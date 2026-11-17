@@ -1,0 +1,397 @@
+import { useMemo, useRef, useState, type PointerEvent as RPointerEvent } from "react";
+import { useStore } from "../store";
+import { HelpBox } from "./HelpBox";
+import { pointsForRoom } from "../utils/geometry";
+import { computeLayout, optimizeLayout, PATTERNS, type PatternId } from "../utils/tileLayout";
+import type { Pt, TileLayoutData } from "../types";
+
+type Mode = "move" | "draw" | "edit" | "pan";
+type Drag =
+  | { k: "grid"; sx: number; sy: number; ox: number; oy: number }
+  | { k: "pan"; sx: number; sy: number; vx: number; vy: number }
+  | { k: "vertex"; i: number }
+  | null;
+
+const btn = "rounded-lg border border-black/15 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-black/5 disabled:opacity-40";
+const btnOn = "rounded-lg border border-black bg-black px-3 py-1.5 text-xs font-semibold text-white";
+const card = "rounded-xl border border-black/10 bg-white p-4";
+const inp = "w-full rounded-lg border border-black/15 bg-white px-2 py-1 text-sm";
+const f1 = (n: number) => n.toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+
+export function Calepinage() {
+  const { project, setTileLayout, patchSettings } = useStore();
+  const floors = project.floors;
+  const [floorId, setFloorId] = useState(floors[0]?.id ?? "");
+  const [roomId, setRoomId] = useState("");
+  const [mode, setMode] = useState<Mode>("move");
+  const [draft, setDraft] = useState<TileLayoutData | null>(null);
+  const [view, setView] = useState({ x: 0, y: 0, w: 25 });
+  const [busy, setBusy] = useState(false);
+  const [optPattern, setOptPattern] = useState<PatternId | "auto">("auto");
+  const [snap, setSnap] = useState(true);
+  const [showLabels, setShowLabels] = useState(true);
+  const drag = useRef<Drag>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const floor = floors.find((f) => f.id === floorId) ?? floors[0];
+  const room = floor?.rooms.find((r) => r.id === roomId) ?? floor?.rooms[0];
+  const scale = floor?.planScale || 40;
+  const tiles = project.settings.carrelage.tiles ?? [];
+  const saved = room ? project.tileLayouts?.[room.id] : undefined;
+  const data = draft ?? saved ?? null;
+  const tile = data ? (tiles.find((t) => t.id === data.tileId) ?? tiles[0]) : undefined;
+  const ar = 0.7;
+
+  const stats = useMemo(
+    () => (data && tile && data.points.length >= 3 ? computeLayout(data.points, tile, data) : null),
+    [data, tile],
+  );
+
+  // Récapitulatif de toutes les pièces calepinées
+  const summary = useMemo(() => {
+    const rows: { name: string; tileName: string; priceM2: number; s: ReturnType<typeof computeLayout> }[] = [];
+    for (const f of project.floors)
+      for (const r of f.rooms) {
+        const d = project.tileLayouts?.[r.id];
+        const t = d && tiles.find((x) => x.id === d.tileId);
+        if (!d || !t || d.points.length < 3) continue;
+        rows.push({ name: r.name, tileName: t.name, priceM2: t.priceM2, s: computeLayout(d.points, t, d, false) });
+      }
+    return rows;
+  }, [project.floors, project.tileLayouts, tiles]);
+  const sumBought = summary.reduce((a, r) => a + r.s.total * r.s.tileArea, 0);
+  const sumRoom = summary.reduce((a, r) => a + r.s.roomArea, 0);
+  const sumCost = summary.reduce((a, r) => a + r.s.total * r.s.tileArea * r.priceM2, 0);
+
+  if (!floor) return <div className={card}>Ajoute d'abord un étage et des pièces dans « Plans & pièces ».</div>;
+
+  const baseData = (points: Pt[]): TileLayoutData => ({
+    points,
+    tileId: room?.tileSolId && tiles.some((t) => t.id === room.tileSolId) ? room.tileSolId : (tiles[0]?.id ?? ""),
+    pattern: "droit",
+    swap: false,
+    offX: 0,
+    offY: 0,
+    jointMm: project.settings.carrelage.jointMm || 3,
+    minCutCm: 5,
+  });
+  const commit = (d: TileLayoutData | null) => {
+    if (room) setTileLayout(room.id, d);
+    setDraft(null);
+  };
+  const update = (patch: Partial<TileLayoutData>) => data && commit({ ...data, ...patch });
+
+  const fit = (pts: Pt[] | undefined) => {
+    if (!pts || pts.length < 2) return setView({ x: 0, y: 0, w: (floor.planWidth || 1000) / scale });
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const bw = Math.max(...xs) - Math.min(...xs);
+    const bh = Math.max(...ys) - Math.min(...ys);
+    const w = Math.max(bw * 1.4, (bh * 1.4) / ar, 2);
+    setView({ x: (Math.min(...xs) + Math.max(...xs)) / 2 - w / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 - (w * ar) / 2, w });
+  };
+
+  const importFromPlan = () => {
+    if (!room) return;
+    const pts = pointsForRoom(room, scale).map((p) => ({ x: p.x / scale, y: p.y / scale }));
+    commit(baseData(pts));
+    fit(pts);
+    setMode("move");
+  };
+
+  const toM = (e: { clientX: number; clientY: number }): Pt => {
+    const svg = svgRef.current!;
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const r = pt.matrixTransform(svg.getScreenCTM()!.inverse());
+    return { x: r.x, y: r.y };
+  };
+  const sn = (p: Pt): Pt => (snap ? { x: Math.round(p.x / 0.05) * 0.05, y: Math.round(p.y / 0.05) * 0.05 } : p);
+
+  const onDown = (e: RPointerEvent<SVGSVGElement>) => {
+    const p = toM(e);
+    if (mode === "draw") {
+      const pts = data?.points ?? [];
+      if (pts.length >= 3 && Math.hypot(p.x - pts[0].x, p.y - pts[0].y) < view.w * 0.012) {
+        setMode("move");
+        return;
+      }
+      const np = [...pts, sn(p)];
+      commit(data ? { ...data, points: np } : baseData(np));
+    } else if (mode === "move" && data) {
+      svgRef.current?.setPointerCapture(e.pointerId);
+      drag.current = { k: "grid", sx: p.x, sy: p.y, ox: data.offX, oy: data.offY };
+    } else if (mode === "pan" || (mode === "edit" && !drag.current)) {
+      svgRef.current?.setPointerCapture(e.pointerId);
+      drag.current = { k: "pan", sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
+    }
+  };
+  const onMove = (e: RPointerEvent<SVGSVGElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    if (d.k === "pan") {
+      const r = svgRef.current!.getBoundingClientRect();
+      const k = view.w / r.width;
+      setView((v) => ({ ...v, x: d.vx - (e.clientX - d.sx) * k, y: d.vy - (e.clientY - d.sy) * k }));
+    } else if (d.k === "grid" && data) {
+      const p = toM(e);
+      const rad = (PATTERNS[data.pattern].angle * Math.PI) / 180;
+      const dx = p.x - d.sx;
+      const dy = p.y - d.sy;
+      setDraft({ ...data, offX: d.ox + dx * Math.cos(rad) + dy * Math.sin(rad), offY: d.oy - dx * Math.sin(rad) + dy * Math.cos(rad) });
+    } else if (d.k === "vertex" && data) {
+      const p = sn(toM(e));
+      setDraft({ ...data, points: data.points.map((q, i) => (i === d.i ? p : q)) });
+    }
+  };
+  const onUp = () => {
+    drag.current = null;
+    if (draft) commit(draft);
+  };
+
+  const optimize = () => {
+    if (!data || !tile) return;
+    setBusy(true);
+    setTimeout(() => {
+      const pats: PatternId[] = optPattern === "auto" ? ["droit", "demi", "tiers", "diag"] : [optPattern];
+      const best = optimizeLayout(data.points, tile, data, pats);
+      commit({ ...data, ...best });
+      setBusy(false);
+    }, 30);
+  };
+
+  const cutGroups = useMemo(() => {
+    const m = new Map<string, number>();
+    stats?.cells.forEach((c) => {
+      if (c.full) return;
+      const k = `${Math.round(c.w * 100)} × ${Math.round(c.h * 100)} cm`;
+      m.set(k, (m.get(k) ?? 0) + 1);
+    });
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  }, [stats]);
+
+  const planW = (floor.planWidth || 1000) / scale;
+  const planH = (floor.planHeight || 700) / scale;
+  const lbl = showLabels && stats && stats.cells.length < 400 && view.w < 12;
+  const centroid = (poly: Pt[]) => ({ x: poly.reduce((a, p) => a + p.x, 0) / poly.length, y: poly.reduce((a, p) => a + p.y, 0) / poly.length });
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="font-display text-2xl uppercase">Calepinage du sol</h1>
+        <p className="text-sm text-black/60">
+          Redessine la pièce par-dessus le plan, choisis un carreau du catalogue Carrelage, puis laisse le site optimiser pour limiter les pertes.
+        </p>
+      </div>
+
+      <HelpBox id="calepinage">
+        <ol>
+          <li><b>Choisis l'étage et la pièce</b> en haut. Le plan de l'étage (image importée dans « Plans & pièces ») s'affiche en transparence sous la pièce. Son échelle doit être réglée pour que les mètres soient justes.</li>
+          <li><b>Contour de la pièce</b> : clique sur « Reprendre le contour de la pièce du plan », ou « Redessiner à la main » : clique pour poser chaque angle, puis reclique sur le point rouge (le premier) pour fermer. « Aimanter » cale les points tous les 5 cm.</li>
+          <li><b>Corriger</b> : mode « Éditer les angles », puis glisse un point. « Déplacer la vue » et « Zoom » servent à se promener sur le plan.</li>
+          <li><b>Carreau</b> : choisis-le dans la liste. C'est le catalogue de l'onglet Carrelage (format, prix au m²) : pour en ajouter un, va d'abord là-bas.</li>
+          <li><b>Motif, joint, coupe mini</b> : motif droit, décalé ou diagonal ; largeur du joint ; « Coupe mini » = en dessous de cette largeur, la coupe est jugée trop étroite à poser et passe en rouge.</li>
+          <li><b>Optimiser</b> : le site essaie tous les motifs, les deux sens et des centaines de décalages, puis garde celui qui demande le moins de carreaux sans chute trop étroite.</li>
+          <li><b>Déplacer le calepinage à la main</b> : mode « Déplacer le calepinage », puis glisse sur le plan (ou saisis le décalage X / Y en cm). Utile pour centrer la pose sur une porte ou un joint de référence.</li>
+          <li><b>Lire le résultat</b> : vert = carreau entier, orange = coupe (avec ses cotes en cm), rouge = chute trop étroite. À droite : carreaux entiers / coupés, total à acheter, perte, coût et estimation avec réemploi des chutes.</li>
+          <li><b>Tableau du bas</b> : récapitule toutes les pièces calepinées. Le bouton « Utiliser cette perte dans le chiffrage Carrelage » met le pourcentage de perte réel dans les réglages du poste Carrelage.</li>
+        </ol>
+        <p>Le calepinage de chaque pièce est enregistré avec le projet (sauvegarde automatique dans ton compte).</p>
+      </HelpBox>
+
+      <div className={`${card} flex flex-wrap items-end gap-3`}>
+        <label className="text-xs font-semibold">
+          Étage
+          <select className={inp} value={floor.id} onChange={(e) => { setFloorId(e.target.value); setRoomId(""); setDraft(null); }}>
+            {floors.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-semibold">
+          Pièce
+          <select className={inp} value={room?.id ?? ""} onChange={(e) => { setRoomId(e.target.value); setDraft(null); }}>
+            {floor.rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+        </label>
+        <div className="flex flex-wrap gap-1.5">
+          {([["move", "Déplacer le calepinage"], ["draw", "Dessiner la pièce"], ["edit", "Éditer les angles"], ["pan", "Déplacer la vue"]] as [Mode, string][]).map(([m, l]) => (
+            <button key={m} className={mode === m ? btnOn : btn} onClick={() => setMode(m)}>{l}</button>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <button className={btn} onClick={() => setView((v) => ({ ...v, w: v.w * 0.8 }))}>Zoom +</button>
+          <button className={btn} onClick={() => setView((v) => ({ ...v, w: v.w * 1.25 }))}>Zoom −</button>
+          <button className={btn} onClick={() => fit(data?.points)}>Ajuster la vue</button>
+          <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} /> Aimanter (5 cm)</label>
+          <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={showLabels} onChange={(e) => setShowLabels(e.target.checked)} /> Cotes des coupes</label>
+        </div>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1fr_340px]">
+        <div className={`${card} p-2`}>
+          <svg
+            ref={svgRef}
+            viewBox={`${view.x} ${view.y} ${view.w} ${view.w * ar}`}
+            className="w-full touch-none select-none rounded-lg bg-[#f4f3ee]"
+            style={{ aspectRatio: "10 / 7", cursor: mode === "draw" ? "crosshair" : mode === "move" ? "grab" : mode === "pan" ? "move" : "default" }}
+            onPointerDown={onDown}
+            onPointerMove={onMove}
+            onPointerUp={onUp}
+          >
+            {floor.planImage && <image href={floor.planImage} x={0} y={0} width={planW} height={planH} opacity={0.55} preserveAspectRatio="none" />}
+            {stats?.cells.map((c, i) => (
+              <path
+                key={i}
+                d={`M${c.poly.map((p) => `${p.x},${p.y}`).join("L")}Z`}
+                fill={c.sliver ? "#f3a6a6" : c.full ? "#d8e6dc" : "#f7cf9e"}
+                fillOpacity={0.9}
+                stroke={c.sliver ? "#b91c1c" : "#5f8a70"}
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+            {lbl && stats!.cells.filter((c) => !c.full).map((c, i) => {
+              const m = centroid(c.poly);
+              return (
+                <text key={i} x={m.x} y={m.y} fontSize={view.w / 110} textAnchor="middle" fill="#7c2d12" style={{ pointerEvents: "none" }}>
+                  {Math.round(c.w * 100)}×{Math.round(c.h * 100)}
+                </text>
+              );
+            })}
+            {data && data.points.length > 0 && (
+              <polygon points={data.points.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#111" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+            )}
+            {data && (mode === "edit" || mode === "draw") &&
+              data.points.map((p, i) => (
+                <circle
+                  key={i}
+                  cx={p.x}
+                  cy={p.y}
+                  r={view.w * 0.007}
+                  fill={i === 0 ? "#dc2626" : "#fff"}
+                  stroke="#111"
+                  strokeWidth={1.5}
+                  vectorEffect="non-scaling-stroke"
+                  style={{ cursor: "grab" }}
+                  onPointerDown={(e) => {
+                    if (mode !== "edit") return;
+                    e.stopPropagation();
+                    svgRef.current?.setPointerCapture(e.pointerId);
+                    drag.current = { k: "vertex", i };
+                  }}
+                />
+              ))}
+          </svg>
+          <p className="px-2 pt-1 text-[11px] text-black/50">
+            Vert = carreau entier · orange = coupe · rouge = chute trop étroite. {mode === "draw" ? "Clique pour poser les angles ; reclique sur le point rouge pour fermer." : mode === "move" ? "Glisse sur le plan pour décaler tout le calepinage." : ""}
+          </p>
+        </div>
+
+        <div className="space-y-3">
+          {!data || data.points.length < 3 ? (
+            <div className={card}>
+              <div className="mb-2 text-sm font-semibold">Contour de {room?.name ?? "la pièce"}</div>
+              <div className="flex flex-col gap-2">
+                <button className={btn} onClick={importFromPlan} disabled={!room}>Reprendre le contour de la pièce du plan</button>
+                <button className={btn} onClick={() => { setMode("draw"); if (data) commit(null); }}>Redessiner à la main sur le plan</button>
+              </div>
+              {data && data.points.length > 0 && <p className="mt-2 text-xs">{data.points.length} point(s) posé(s) — il en faut au moins 3.</p>}
+            </div>
+          ) : (
+            <div className={`${card} space-y-3`}>
+              <label className="block text-xs font-semibold">
+                Carreau (catalogue Carrelage)
+                <select className={inp} value={tile?.id ?? ""} onChange={(e) => update({ tileId: e.target.value })}>
+                  {tiles.map((t) => <option key={t.id} value={t.id}>{t.name} — {Math.round(t.tileL * 100)}×{Math.round(t.tileW * 100)} cm · {f1(t.priceM2)} €/m²</option>)}
+                </select>
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="text-xs font-semibold">Motif
+                  <select className={inp} value={data.pattern} onChange={(e) => update({ pattern: e.target.value as PatternId })}>
+                    {(Object.keys(PATTERNS) as PatternId[]).map((k) => <option key={k} value={k}>{PATTERNS[k].label}</option>)}
+                  </select>
+                </label>
+                <label className="text-xs font-semibold">Joint (mm)
+                  <input className={inp} type="number" min={0} step={0.5} value={data.jointMm} onChange={(e) => update({ jointMm: Number(e.target.value) })} />
+                </label>
+                <label className="text-xs font-semibold">Décalage X (cm)
+                  <input className={inp} type="number" step={0.5} value={Math.round(data.offX * 1000) / 10} onChange={(e) => update({ offX: Number(e.target.value) / 100 })} />
+                </label>
+                <label className="text-xs font-semibold">Décalage Y (cm)
+                  <input className={inp} type="number" step={0.5} value={Math.round(data.offY * 1000) / 10} onChange={(e) => update({ offY: Number(e.target.value) / 100 })} />
+                </label>
+                <label className="text-xs font-semibold">Coupe mini (cm)
+                  <input className={inp} type="number" min={0} value={data.minCutCm} onChange={(e) => update({ minCutCm: Number(e.target.value) })} />
+                </label>
+                <label className="mt-5 flex items-center gap-1 text-xs"><input type="checkbox" checked={data.swap} onChange={(e) => update({ swap: e.target.checked })} /> Tourner de 90°</label>
+              </div>
+              <div className="flex gap-2">
+                <select className={inp} value={optPattern} onChange={(e) => setOptPattern(e.target.value as PatternId | "auto")}>
+                  <option value="auto">Optimiser : tous les motifs</option>
+                  {(Object.keys(PATTERNS) as PatternId[]).map((k) => <option key={k} value={k}>Optimiser : {PATTERNS[k].label}</option>)}
+                </select>
+                <button className={btnOn} onClick={optimize} disabled={busy || !tile}>{busy ? "Calcul…" : "Optimiser"}</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button className={btn} onClick={() => update({ offX: 0, offY: 0 })}>Remettre le décalage à 0</button>
+                <button className={btn} onClick={() => commit(null)}>Supprimer ce calepinage</button>
+              </div>
+            </div>
+          )}
+
+          {stats && tile && (
+            <div className={`${card} text-sm`}>
+              <div className="mb-2 font-semibold">Résultat — {room?.name}</div>
+              <table className="w-full text-xs">
+                <tbody>
+                  <tr><td>Surface de la pièce</td><td className="text-right">{f1(stats.roomArea)} m²</td></tr>
+                  <tr><td>Carreaux entiers</td><td className="text-right">{stats.full}</td></tr>
+                  <tr><td>Carreaux à couper</td><td className="text-right">{stats.cut}</td></tr>
+                  <tr className="font-bold"><td>Total à acheter</td><td className="text-right">{stats.total} ({f1(stats.total * stats.tileArea)} m²)</td></tr>
+                  <tr><td>Perte</td><td className="text-right">{f1(stats.wastePct)} %</td></tr>
+                  <tr><td>Avec réemploi des chutes (estim.)</td><td className="text-right">{stats.needReuse}</td></tr>
+                  <tr><td>Chutes trop étroites</td><td className={`text-right ${stats.slivers ? "font-bold text-red-600" : ""}`}>{stats.slivers}</td></tr>
+                  <tr><td>Coût carreaux</td><td className="text-right">{f1(stats.total * stats.tileArea * tile.priceM2)} €</td></tr>
+                </tbody>
+              </table>
+              {cutGroups.length > 0 && (
+                <div className="mt-2 text-xs text-black/60">
+                  Coupes : {cutGroups.map(([k, n]) => `${n} × ${k}`).join(" · ")}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {summary.length > 0 && (
+        <div className={card}>
+          <div className="mb-2 text-sm font-semibold">Toutes les pièces calepinées</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead><tr className="text-left text-black/50"><th>Pièce</th><th>Carreau</th><th className="text-right">Surface</th><th className="text-right">Carreaux</th><th className="text-right">Perte</th><th className="text-right">Coût</th></tr></thead>
+              <tbody>
+                {summary.map((r, i) => (
+                  <tr key={i} className="border-t border-black/5">
+                    <td>{r.name}</td><td>{r.tileName}</td>
+                    <td className="text-right">{f1(r.s.roomArea)} m²</td><td className="text-right">{r.s.total}</td>
+                    <td className="text-right">{f1(r.s.wastePct)} %</td><td className="text-right">{f1(r.s.total * r.s.tileArea * r.priceM2)} €</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
+            <span>Total : {f1(sumCost)} € · perte réelle équivalente {f1(sumRoom > 0 ? (sumBought / sumRoom - 1) * 100 : 0)} % de la surface</span>
+            <button
+              className={btn}
+              onClick={() => patchSettings("carrelage", (c) => ({ ...c, wastePct: Math.ceil((sumBought / sumRoom - 1) * 1000) / 10 }))}
+            >
+              Utiliser cette perte dans le chiffrage Carrelage
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
