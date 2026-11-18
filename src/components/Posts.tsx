@@ -29,7 +29,7 @@ import { Btn, Card, Field, H, Num, Select, Stat, TableWrap, Td, Th, Toggle } fro
 import { House3D } from "./House3D";
 
 export function PostPage({ post }: { post: PostId }) {
-  const { calc, project, setPage } = useStore();
+  const { calc, project, setPage, openTutorial } = useStore();
   const meta = POSTS.find((p) => p.id === post)!;
   const items = calc.byPost[post];
   const total = calc.costByPost[post];
@@ -73,7 +73,7 @@ export function PostPage({ post }: { post: PostId }) {
         <Btn onClick={() => exportShoppingPdf(project, calc, post)}>
           <FileDown size={14} /> PDF de ce poste
         </Btn>
-        <Btn variant="ghost" onClick={() => setPage("tutoriels")}>
+        <Btn variant="ghost" onClick={() => (tutos[0] ? openTutorial(tutos[0].id) : setPage("tutoriels"))}>
           Tutoriels {meta.short}
         </Btn>
       </div>
@@ -93,7 +93,7 @@ export function PostPage({ post }: { post: PostId }) {
                 <div className="text-xs text-stone-500">
                   {t.duration} · {t.level}
                 </div>
-                <button className="mt-1 text-xs font-semibold text-terra" onClick={() => setPage("tutoriels")}>
+                <button className="mt-1 text-xs font-semibold text-terra" onClick={() => openTutorial(t.id)}>
                   Ouvrir le tuto →
                 </button>
               </div>

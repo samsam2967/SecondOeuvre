@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { NORMS, NORM_POSTS } from "../data/norms";
+import { NORMS, NORM_POSTS, normsMeta } from "../data/norms";
+import { updateNorms, type NormsUpdateResult } from "../utils/normsUpdate";
 import { ROOM_TYPES } from "../data/catalogs";
 import { useStore } from "../store";
 import type { RoomType } from "../types";
@@ -48,6 +49,9 @@ export function Normes() {
   const [pdfBusy, setPdfBusy] = useState(false);
   const [room, setRoom] = useState<string>("chantier");
   const [q, setQ] = useState("");
+  const [upd, setUpd] = useState<NormsUpdateResult | null>(null);
+  const [updBusy, setUpdBusy] = useState(false);
+  const meta = upd?.meta ?? normsMeta;
 
   const filtered = NORMS.filter((n) => {
     if (post !== "tous" && n.post !== post) return false;
@@ -78,6 +82,32 @@ export function Normes() {
         sub="Chaque corps d'état a ses DTU et règles. Parcourez poste par poste, ou filtrez selon les pièces de votre chantier."
       />
 
+      <div className="mb-4 rounded-2xl border border-rule bg-white/70 p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            disabled={updBusy}
+            className="rounded-full bg-terra px-5 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            onClick={async () => {
+              setUpdBusy(true);
+              setUpd(await updateNorms());
+              setUpdBusy(false);
+            }}
+          >
+            {updBusy ? "Mise à jour…" : "Mettre à jour les normes"}
+          </button>
+          <span className="text-xs text-stone-600">
+            {meta ? `Liste du ${meta.date} (v. ${meta.version}) · vérifiée le ${new Date(meta.checkedAt).toLocaleString("fr-FR")}` : "Liste d'origine du site, jamais mise à jour sur cet appareil."}
+          </span>
+        </div>
+        {upd && <div className={`mt-2 rounded-lg px-3 py-2 text-xs ${upd.ok ? "bg-emerald-50 text-emerald-900" : "bg-amber-50 text-amber-900"}`}>{upd.message}</div>}
+        {upd?.meta && (upd.meta.added.length > 0 || upd.meta.changed.length > 0) && (
+          <ul className="mt-2 list-disc pl-5 text-xs text-stone-700">
+            {upd.meta.added.map((t) => <li key={`a${t}`}><b>Nouveau :</b> {t}</li>)}
+            {upd.meta.changed.map((t) => <li key={`c${t}`}><b>Modifié :</b> {t}</li>)}
+          </ul>
+        )}
+        <p className="mt-2 text-[11px] text-stone-500">Le bouton récupère la liste de règles tenue à jour dans le dépôt du site. Les DTU et textes officiels évoluent : vérifie toujours la version en vigueur auprès du CSTB / Légifrance avant un acte engageant.</p>
+      </div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <button
           disabled={pdfBusy}

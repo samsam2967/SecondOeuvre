@@ -51,3 +51,51 @@ export const NORMS: NormItem[] = [
 ];
 
 export const NORM_POSTS = ["général", "placo", "isolation", "électricité", "sanitaire", "vmc", "chauffage", "peinture", "carrelage", "quincaillerie"] as const;
+
+// ───────────── Mise à jour des normes en un clic ─────────────
+export const NORMS_STORAGE_KEY = "chantier-normes-maj-v1";
+
+export interface NormsMeta {
+  version: string;
+  /** Date de la liste officielle chargée (AAAA-MM-JJ). */
+  date: string;
+  /** Dernière vérification faite par le site (ISO). */
+  checkedAt: string;
+  source: string;
+  added: string[];
+  changed: string[];
+}
+
+/** Fusionne une liste de règles (ajout ou remplacement par identifiant) dans NORMS, en place. */
+export function mergeNorms(items: NormItem[]): { added: string[]; changed: string[] } {
+  const added: string[] = [];
+  const changed: string[] = [];
+  for (const it of items) {
+    const i = NORMS.findIndex((n) => n.id === it.id);
+    if (i < 0) {
+      NORMS.push(it);
+      added.push(it.title);
+    } else if (JSON.stringify(NORMS[i]) !== JSON.stringify(it)) {
+      NORMS[i] = it;
+      changed.push(it.title);
+    }
+  }
+  return { added, changed };
+}
+
+export function loadStoredNorms(): NormsMeta | null {
+  try {
+    const raw = localStorage.getItem(NORMS_STORAGE_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as { meta: NormsMeta; items: NormItem[] };
+    mergeNorms(d.items);
+    return d.meta;
+  } catch {
+    return null;
+  }
+}
+
+export let normsMeta: NormsMeta | null = typeof localStorage !== "undefined" ? loadStoredNorms() : null;
+export const setNormsMeta = (m: NormsMeta | null) => {
+  normsMeta = m;
+};

@@ -49,6 +49,9 @@ interface Store {
   /** Matériau à montrer à l'ouverture de la page Matériaux (lien depuis le récapitulatif). */
   focusMaterial: MatTarget | null;
   openMaterial: (t: MatTarget | null) => void;
+  /** Fiche tutoriel à ouvrir à l'arrivée sur la page Tutoriels. */
+  tutoOpen: string | null;
+  openTutorial: (id: string | null) => void;
   calc: CalcResult;
   setSettings: (s: Settings | ((s: Settings) => Settings)) => void;
   patchSettings: <K extends keyof Settings>(key: K, value: Settings[K] | ((v: Settings[K]) => Settings[K])) => void;
@@ -203,6 +206,7 @@ export function StoreProvider({
   const [project, setProject] = useState<Project>(() => migrate(boot.project));
   const [page, setPage] = useState<PageId>("dashboard");
   const [focusMaterial, setFocusMaterial] = useState<MatTarget | null>(null);
+  const [tutoOpen, setTutoOpen] = useState<string | null>(null);
   const [projectId, setProjectId] = useState(boot.projectId);
   const [cloudStatus, setCloudStatus] = useState<CloudStatus>("saved");
   const [cloudMessage, setCloudMessage] = useState("");
@@ -409,6 +413,11 @@ export function StoreProvider({
     page,
     setPage,
     focusMaterial,
+    tutoOpen,
+    openTutorial: (id) => {
+      setTutoOpen(id);
+      if (id) setPage("tutoriels");
+    },
     openMaterial: (t) => {
       setFocusMaterial(t);
       if (t) setPage("materiaux");

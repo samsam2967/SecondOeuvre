@@ -1030,7 +1030,13 @@ function computeInner(project: Project): CalcResult {
   let tileFloor = 0;
   let tileWall = 0;
   let wetFloor = 0;
+  /** m² de carrelage pondérés par la largeur de joint de chaque pièce (la consommation de joint est proportionnelle à la largeur). */
+  let jointWeightedM2 = 0;
+  const gJoint = Math.max(0.5, S.carrelage.jointMm || 3);
   for (const pr of perRoom) {
+    const jr = pr.room.jointMm && pr.room.jointMm > 0 ? pr.room.jointMm / gJoint : 1;
+    if (pr.room.tileFloor) jointWeightedM2 += pr.surfaces.floor * jr;
+    if (pr.room.tileWalls) jointWeightedM2 += Math.max(0, pr.surfaces.perimeter * pr.room.tileWallHeight - pr.surfaces.openingsSingle) * jr;
     if (pr.room.tileFloor) {
       tileFloor += pr.surfaces.floor;
       if (ROOM_TYPES.find((t) => t.id === pr.room.type)?.wet) wetFloor += pr.surfaces.floor;
@@ -1085,8 +1091,9 @@ function computeInner(project: Project): CalcResult {
     }
     const colleKg = waste(tileM2 * S.carrelage.colleKgM2, 8);
     items.push(item("carrelage", "Colle", "Mortier-colle C2 S1", "sac 25 kg", "sac", Math.max(1, Math.ceil(colleKg / 25)), S.carrelage.prices.colle_25kg, `${fmt(colleKg)} kg · ${S.carrelage.colleKgM2} kg/m²`));
-    const jointKg = waste(tileM2 * S.carrelage.jointKgM2, 15);
-    items.push(item("carrelage", "Joints", `Joint ${S.carrelage.jointMm} mm`, "sac 5 kg", "sac", Math.max(1, Math.ceil(jointKg / 5)), S.carrelage.prices.joint_5kg, `${fmt(jointKg)} kg`));
+    const jointKg = waste(jointWeightedM2 * S.carrelage.jointKgM2, 15);
+    const jointSizes = [...new Set(perRoom.filter((pr) => pr.room.tileFloor || pr.room.tileWalls).map((pr) => (pr.room.jointMm && pr.room.jointMm > 0 ? pr.room.jointMm : S.carrelage.jointMm)))].sort((a, b) => a - b);
+    items.push(item("carrelage", "Joints", `Joint ${S.carrelage.jointMm} mm`, "sac 5 kg", "sac", Math.max(1, Math.ceil(jointKg / 5)), S.carrelage.prices.joint_5kg, `${fmt(jointKg)} kg${jointSizes.length > 1 ? ` · joints ${jointSizes.join(" / ")} mm selon les pièces` : ""}`));
     items.push(item("carrelage", "Primaire", "Primaire d'accrochage", "bidon 5 L", "u", Math.max(1, Math.ceil((tileM2 * S.carrelage.primaireLperM2) / 5)), S.carrelage.prices.primaire_5l));
     items.push(item("carrelage", "Accessoires", "Croisillons", "sachet 500", "sachet", Math.max(1, Math.ceil(tileM2 / 8)), S.carrelage.prices.croisillons_500));
     items.push(item("carrelage", "Accessoires", "Croisillons autonivelants", "sachet 100", "sachet", Math.max(1, Math.ceil(tileM2 / 6)), S.carrelage.prices.croisillons_autonivel_100, "Grands formats ≥ 60 cm"));
@@ -1673,7 +1680,8 @@ export function roomMaterials(project: Project, roomId: string): RoomMaterialLin
     if (m2 > 0.05) {
       const colleKg = waste(m2 * C.colleKgM2, 8);
       out.push({ post: "carrelage", name: "Mortier-colle", qty: Math.round(colleKg * 10) / 10, unit: "kg", unitPrice: (C.prices.colle_25kg ?? 0) / 25, ref: "Mortier-colle C2 S1", priceBasis: `sac de 25 kg = ${C.prices.colle_25kg} €`, note: `${fmt(m2)} m² carrelés · ${C.colleKgM2} kg/m²` });
-      part(`Joint ${C.jointMm} mm`, waste(m2 * C.jointKgM2, 15) / 5, "sac", C.prices.joint_5kg, `Joint ${C.jointMm} mm`, "part de la pièce (sac de 5 kg)");
+      const jRoom = room.jointMm && room.jointMm > 0 ? room.jointMm : C.jointMm;
+      part(`Joint ${C.jointMm} mm`, waste(m2 * C.jointKgM2 * (jRoom / Math.max(0.5, C.jointMm || 3)), 15) / 5, "sac", C.prices.joint_5kg, `Joint ${C.jointMm} mm`, `part de la pièce (sac de 5 kg) · joint ${jRoom} mm`);
       part("Primaire d'accrochage", (m2 * C.primaireLperM2) / 5, "bidon", C.prices.primaire_5l, "Primaire d'accrochage", "part de la pièce (bidon de 5 L)");
       part("Croisillons", m2 / 8, "sachet", C.prices.croisillons_500, "Croisillons", "part de la pièce");
       part("Croisillons autonivelants", m2 / 6, "sachet", C.prices.croisillons_autonivel_100, "Croisillons autonivelants", "part de la pièce");

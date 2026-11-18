@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type PointerEvent as RPointerEvent } from "r
 import { useStore } from "../store";
 import { HelpBox } from "./HelpBox";
 import { pointsForRoom } from "../utils/geometry";
-import { computeLayout, optimizeLayout, PATTERNS, type PatternId } from "../utils/tileLayout";
+import { computeLayout, effectiveAngle, isStaggered, optimizeLayout, PATTERNS, type PatternId } from "../utils/tileLayout";
 import type { Pt, TileLayoutData } from "../types";
 
 type Mode = "move" | "draw" | "edit" | "pan";
@@ -19,7 +19,7 @@ const inp = "w-full rounded-lg border border-black/15 bg-white px-2 py-1 text-sm
 const f1 = (n: number) => n.toLocaleString("fr-FR", { maximumFractionDigits: 1 });
 
 export function Calepinage() {
-  const { project, setTileLayout, patchSettings } = useStore();
+  const { project, setTileLayout, patchSettings, updateRoom } = useStore();
   const floors = project.floors;
   const [floorId, setFloorId] = useState(floors[0]?.id ?? "");
   const [roomId, setRoomId] = useState("");
@@ -72,13 +72,24 @@ export function Calepinage() {
     swap: false,
     offX: 0,
     offY: 0,
-    jointMm: project.settings.carrelage.jointMm || 3,
+    jointMm: room?.jointMm && room.jointMm > 0 ? room.jointMm : project.settings.carrelage.jointMm || 3,
     minCutCm: 5,
   });
   const commit = (d: TileLayoutData | null) => {
     if (room) setTileLayout(room.id, d);
+    if (room && d && (room.jointMm ?? 0) !== d.jointMm) updateRoom(room.floorId, room.id, { jointMm: d.jointMm });
     setDraft(null);
   };
+  /** Même largeur de joint pour toutes les pièces (réglage des pièces + calepinages existants). */
+  const applyJointToAll = (mm: number) => {
+    for (const f of project.floors)
+      for (const r of f.rooms) {
+        updateRoom(f.id, r.id, { jointMm: mm });
+        const d = project.tileLayouts?.[r.id];
+        if (d) setTileLayout(r.id, { ...d, jointMm: mm });
+      }
+  };
+  const nudgeGrid = (dxCm: number, dyCm: number) => data && commit({ ...data, centered: false, offX: data.offX + dxCm / 100, offY: data.offY + dyCm / 100 });
   const update = (patch: Partial<TileLayoutData>) => data && commit({ ...data, ...patch });
 
   const fit = (pts: Pt[] | undefined) => {
@@ -136,10 +147,14 @@ export function Calepinage() {
       setView((v) => ({ ...v, x: d.vx - (e.clientX - d.sx) * k, y: d.vy - (e.clientY - d.sy) * k }));
     } else if (d.k === "grid" && data) {
       const p = toM(e);
-      const rad = (PATTERNS[data.pattern].angle * Math.PI) / 180;
+      const rad = (effectiveAngle(data) * Math.PI) / 180;
       const dx = p.x - d.sx;
       const dy = p.y - d.sy;
-      setDraft({ ...data, offX: d.ox + dx * Math.cos(rad) + dy * Math.sin(rad), offY: d.oy - dx * Math.sin(rad) + dy * Math.cos(rad) });
+      const mx = data.origin === "hd" || data.origin === "bd" ? -1 : 1;
+      const my = data.origin === "bg" || data.origin === "bd" ? -1 : 1;
+      const ex = dx * mx;
+      const ey = dy * my;
+      setDraft({ ...data, centered: false, offX: d.ox + ex * Math.cos(rad) + ey * Math.sin(rad), offY: d.oy - ex * Math.sin(rad) + ey * Math.cos(rad) });
     } else if (d.k === "vertex" && data) {
       const p = sn(toM(e));
       setDraft({ ...data, points: data.points.map((q, i) => (i === d.i ? p : q)) });
@@ -154,7 +169,7 @@ export function Calepinage() {
     if (!data || !tile) return;
     setBusy(true);
     setTimeout(() => {
-      const pats: PatternId[] = optPattern === "auto" ? ["droit", "demi", "tiers", "diag"] : [optPattern];
+      const pats: PatternId[] = optPattern === "auto" ? ["droit", "demi", "tiers", "quinconce", "diag"] : [optPattern];
       const best = optimizeLayout(data.points, tile, data, pats);
       commit({ ...data, ...best });
       setBusy(false);
@@ -168,7 +183,7 @@ export function Calepinage() {
       const k = `${Math.round(c.w * 100)} × ${Math.round(c.h * 100)} cm`;
       m.set(k, (m.get(k) ?? 0) + 1);
     });
-    return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
   }, [stats]);
 
   const planW = (floor.planWidth || 1000) / scale;
@@ -305,25 +320,92 @@ export function Calepinage() {
                   {tiles.map((t) => <option key={t.id} value={t.id}>{t.name} — {Math.round(t.tileL * 100)}×{Math.round(t.tileW * 100)} cm · {f1(t.priceM2)} €/m²</option>)}
                 </select>
               </label>
+              <div>
+                <div className="mb-1 text-xs font-semibold">Pose en quinconce (carreaux décalés d'une rangée à l'autre)</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button className={!isStaggered(data) && data.pattern !== "diag" ? btnOn : btn} onClick={() => update({ pattern: "droit" })}>Non — joints alignés</button>
+                  <button className={isStaggered(data) ? btnOn : btn} onClick={() => update({ pattern: "quinconce", shiftPct: data.shiftPct ?? 50 })}>Oui — en quinconce</button>
+                </div>
+              </div>
+              {isStaggered(data) && (
+                <div className="space-y-2 rounded-lg bg-black/[0.03] p-2">
+                  <div className="text-xs font-semibold">Décalage d'une rangée sur la précédente</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[[50, "1/2"], [33, "1/3"], [25, "1/4"], [20, "1/5"], [10, "10 %"]].map(([v, l]) => (
+                      <button key={v} className={data.pattern === "quinconce" && (data.shiftPct ?? 50) === v ? btnOn : btn} onClick={() => update({ pattern: "quinconce", shiftPct: v as number })}>{l}</button>
+                    ))}
+                    <label className="flex items-center gap-1 text-xs">
+                      libre
+                      <input className="w-16 rounded-lg border border-black/15 bg-white px-2 py-1 text-sm" type="number" min={1} max={99} value={data.pattern === "quinconce" ? (data.shiftPct ?? 50) : data.pattern === "demi" ? 50 : 33} onChange={(e) => update({ pattern: "quinconce", shiftPct: Math.min(99, Math.max(1, Number(e.target.value))) })} />
+                      % du carreau
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-xs font-semibold">Répartition
+                      <select className={inp} value={data.shiftMode ?? "alterne"} onChange={(e) => update({ pattern: "quinconce", shiftPct: data.shiftPct ?? (data.pattern === "tiers" ? 33 : 50), shiftMode: e.target.value as "alterne" | "progressif" })}>
+                        <option value="alterne">Une rangée sur deux décalée</option>
+                        <option value="progressif">Chaque rangée décalée de plus</option>
+                      </select>
+                    </label>
+                    <label className="text-xs font-semibold">Sens du décalage
+                      <select className={inp} value={data.shiftAxis ?? "rangees"} onChange={(e) => update({ shiftAxis: e.target.value as "rangees" | "colonnes" })}>
+                        <option value="rangees">Rangées (décalage horizontal)</option>
+                        <option value="colonnes">Colonnes (décalage vertical)</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p className="text-[11px] text-black/50">Un décalage de 1/2 sur un carreau long (ex. 20×120 cm) est déconseillé : les carreaux rectifiés peuvent bomber ; 1/3 ou 1/4 est la règle usuelle (DTU 52.2).</p>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-2">
                 <label className="text-xs font-semibold">Motif
-                  <select className={inp} value={data.pattern} onChange={(e) => update({ pattern: e.target.value as PatternId })}>
+                  <select className={inp} value={data.pattern} onChange={(e) => update({ pattern: e.target.value as PatternId, ...(e.target.value === "quinconce" ? { shiftPct: data.shiftPct ?? 50 } : {}) })}>
                     {(Object.keys(PATTERNS) as PatternId[]).map((k) => <option key={k} value={k}>{PATTERNS[k].label}</option>)}
                   </select>
                 </label>
                 <label className="text-xs font-semibold">Joint (mm)
                   <input className={inp} type="number" min={0} step={0.5} value={data.jointMm} onChange={(e) => update({ jointMm: Number(e.target.value) })} />
                 </label>
-                <label className="text-xs font-semibold">Décalage X (cm)
-                  <input className={inp} type="number" step={0.5} value={Math.round(data.offX * 1000) / 10} onChange={(e) => update({ offX: Number(e.target.value) / 100 })} />
-                </label>
-                <label className="text-xs font-semibold">Décalage Y (cm)
-                  <input className={inp} type="number" step={0.5} value={Math.round(data.offY * 1000) / 10} onChange={(e) => update({ offY: Number(e.target.value) / 100 })} />
+                <label className="text-xs font-semibold">Angle de pose (°)
+                  <input className={inp} type="number" step={1} value={data.angleDeg ?? 0} onChange={(e) => update({ angleDeg: Number(e.target.value) })} />
                 </label>
                 <label className="text-xs font-semibold">Coupe mini (cm)
                   <input className={inp} type="number" min={0} value={data.minCutCm} onChange={(e) => update({ minCutCm: Number(e.target.value) })} />
                 </label>
-                <label className="mt-5 flex items-center gap-1 text-xs"><input type="checkbox" checked={data.swap} onChange={(e) => update({ swap: e.target.checked })} /> Tourner de 90°</label>
+                <label className="text-xs font-semibold">Décalage X (cm)
+                  <input className={inp} type="number" step={0.5} value={Math.round(data.offX * 1000) / 10} onChange={(e) => update({ centered: false, offX: Number(e.target.value) / 100 })} />
+                </label>
+                <label className="text-xs font-semibold">Décalage Y (cm)
+                  <input className={inp} type="number" step={0.5} value={Math.round(data.offY * 1000) / 10} onChange={(e) => update({ centered: false, offY: Number(e.target.value) / 100 })} />
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <label className="flex items-center gap-1"><input type="checkbox" checked={data.swap} onChange={(e) => update({ swap: e.target.checked })} /> Tourner le carreau de 90°</label>
+                <label className="flex items-center gap-1"><input type="checkbox" checked={!!data.centered} onChange={(e) => update({ centered: e.target.checked })} /> Centrer la pose sur la pièce</label>
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold">Pose partant du coin</div>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {([["hg", "↖ haut-gauche"], ["hd", "↗ haut-droit"], ["bg", "↙ bas-gauche"], ["bd", "↘ bas-droit"]] as const).map(([k, l]) => (
+                    <button key={k} className={(data.origin ?? "hg") === k ? btnOn : btn} onClick={() => update({ origin: k, centered: false })}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold">Déplacer le calepinage au clavier</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {[1, 5].map((n) => (
+                    <span key={n} className="flex gap-1">
+                      <button className={btn} onClick={() => nudgeGrid(-n, 0)}>← {n} cm</button>
+                      <button className={btn} onClick={() => nudgeGrid(n, 0)}>{n} cm →</button>
+                      <button className={btn} onClick={() => nudgeGrid(0, -n)}>↑ {n} cm</button>
+                      <button className={btn} onClick={() => nudgeGrid(0, n)}>↓ {n} cm</button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <button className={btn} onClick={() => applyJointToAll(data.jointMm)}>Appliquer ce joint ({data.jointMm} mm) à toutes les pièces</button>
               </div>
               <div className="flex gap-2">
                 <select className={inp} value={optPattern} onChange={(e) => setOptPattern(e.target.value as PatternId | "auto")}>
@@ -355,8 +437,17 @@ export function Calepinage() {
                 </tbody>
               </table>
               {cutGroups.length > 0 && (
+                <details className="mt-2 text-xs">
+                  <summary className="cursor-pointer font-semibold">Liste des coupes à préparer ({cutGroups.reduce((a, [, n]) => a + n, 0)})</summary>
+                  <table className="mt-1 w-full">
+                    <thead><tr className="text-left text-black/50"><th>Coupe (longueur × largeur)</th><th className="text-right">Nombre</th></tr></thead>
+                    <tbody>{cutGroups.map(([k, n]) => <tr key={k} className="border-t border-black/5"><td>{k}</td><td className="text-right">{n}</td></tr>)}</tbody>
+                  </table>
+                </details>
+              )}
+              {cutGroups.length > 0 && (
                 <div className="mt-2 text-xs text-black/60">
-                  Coupes : {cutGroups.map(([k, n]) => `${n} × ${k}`).join(" · ")}
+                  Coupes : {cutGroups.slice(0, 8).map(([k, n]) => `${n} × ${k}`).join(" · ")}{cutGroups.length > 8 ? ` · … (${cutGroups.length} formats, liste complète ci-dessus)` : ""}
                 </div>
               )}
             </div>

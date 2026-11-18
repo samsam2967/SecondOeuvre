@@ -2,11 +2,23 @@ import type { Pt, TileLayoutData } from "../types";
 
 export const PATTERNS = {
   droit: { angle: 0, shift: 0, label: "Droit (joints alignés)" },
-  demi: { angle: 0, shift: 0.5, label: "Décalé 1/2" },
-  tiers: { angle: 0, shift: 1 / 3, label: "Décalé 1/3" },
+  demi: { angle: 0, shift: 0.5, label: "Décalé 1/2 (quinconce classique)" },
+  tiers: { angle: 0, shift: 1 / 3, label: "Décalé 1/3 (progressif)" },
+  quinconce: { angle: 0, shift: 0.5, label: "Quinconce réglable (décalage au choix)" },
   diag: { angle: 45, shift: 0, label: "Diagonal 45°" },
 } as const;
 export type PatternId = keyof typeof PATTERNS;
+
+/** Angle réel de la grille (motif + angle libre + sens de décalage), en degrés. */
+export function effectiveAngle(p: Pick<TileLayoutData, "pattern" | "angleDeg" | "shiftAxis">): number {
+  return PATTERNS[p.pattern].angle + (p.angleDeg ?? 0) + (p.shiftAxis === "colonnes" ? 90 : 0);
+}
+
+/** Les carreaux sont-ils décalés d'une rangée à l'autre (en quinconce ou décalé) ? */
+export function isStaggered(p: Pick<TileLayoutData, "pattern" | "shiftPct">): boolean {
+  if (p.pattern === "quinconce") return (p.shiftPct ?? 50) % 100 !== 0;
+  return p.pattern === "demi" || p.pattern === "tiers";
+}
 
 export interface Cell {
   /** Polygone de la partie de carreau posée, en mètres (repère du plan). */
@@ -18,6 +30,12 @@ export interface Cell {
   h: number;
   /** Chute trop étroite pour être posée proprement. */
   sliver: boolean;
+  /** Repère du carreau dans le plan (m) : coin d'origine, axes unitaires de sa longueur et de sa largeur, dimensions. Sert à plaquer la photo du produit. */
+  o?: Pt;
+  ux?: Pt;
+  uy?: Pt;
+  tl?: number;
+  tw?: number;
 }
 
 export interface LayoutStats {
@@ -34,7 +52,8 @@ export interface LayoutStats {
   needReuse: number;
 }
 
-export type LayoutParams = Pick<TileLayoutData, "pattern" | "swap" | "offX" | "offY" | "jointMm" | "minCutCm">;
+export type LayoutParams = Pick<TileLayoutData, "pattern" | "swap" | "offX" | "offY" | "jointMm" | "minCutCm"> &
+  Partial<Pick<TileLayoutData, "shiftPct" | "shiftMode" | "shiftAxis" | "angleDeg" | "centered" | "origin">>;
 
 export function polyArea(p: Pt[]): number {
   let a = 0;
@@ -78,26 +97,52 @@ export function computeLayout(
   keepCells = true,
 ): LayoutStats {
   const roomArea = polyArea(points);
-  const L = p.swap ? tile.tileW : tile.tileL;
-  const W = p.swap ? tile.tileL : tile.tileW;
+  const cols = p.shiftAxis === "colonnes";
+  // Décaler les colonnes = décaler les rangées d'une grille tournée de 90° (carreau inversé dans le repère de la grille).
+  const L0 = p.swap ? tile.tileW : tile.tileL;
+  const W0 = p.swap ? tile.tileL : tile.tileW;
+  const L = cols ? W0 : L0;
+  const W = cols ? L0 : W0;
   const tileArea = L * W;
   const j = Math.max(0, p.jointMm) / 1000;
   const px = L + j;
   const py = W + j;
-  const { angle, shift } = PATTERNS[p.pattern];
-  const rad = (angle * Math.PI) / 180;
+  const base = PATTERNS[p.pattern];
+  const rad = (effectiveAngle(p) * Math.PI) / 180;
   const c = Math.cos(rad);
   const s = Math.sin(rad);
-  const o = { x: Math.min(...points.map((q) => q.x)), y: Math.min(...points.map((q) => q.y)) };
+  const minPX = Math.min(...points.map((q) => q.x));
+  const maxPX = Math.max(...points.map((q) => q.x));
+  const minPY = Math.min(...points.map((q) => q.y));
+  const maxPY = Math.max(...points.map((q) => q.y));
+  const sx = p.origin === "hd" || p.origin === "bd" ? -1 : 1;
+  const sy = p.origin === "bg" || p.origin === "bd" ? -1 : 1;
+  const o = { x: sx > 0 ? minPX : maxPX, y: sy > 0 ? minPY : maxPY };
+  const raw = (q: Pt): Pt => {
+    const dx = (q.x - o.x) * sx;
+    const dy = (q.y - o.y) * sy;
+    return { x: dx * c + dy * s, y: -dx * s + dy * c };
+  };
+  let offX = p.offX;
+  let offY = p.offY;
+  if (p.centered) {
+    // un carreau centré sur le centre de la pièce : coupes égales de chaque côté
+    const r = points.map(raw);
+    const cx = (Math.min(...r.map((q) => q.x)) + Math.max(...r.map((q) => q.x))) / 2;
+    const cy = (Math.min(...r.map((q) => q.y)) + Math.max(...r.map((q) => q.y))) / 2;
+    offX = cx - L / 2;
+    offY = cy - W / 2;
+  }
   const toF = (q: Pt): Pt => {
-    const dx = q.x - o.x;
-    const dy = q.y - o.y;
-    return { x: dx * c + dy * s - p.offX, y: -dx * s + dy * c - p.offY };
+    const r = raw(q);
+    return { x: r.x - offX, y: r.y - offY };
   };
   const toW = (f: Pt): Pt => {
-    const x = f.x + p.offX;
-    const y = f.y + p.offY;
-    return { x: o.x + x * c - y * s, y: o.y + x * s + y * c };
+    const x = f.x + offX;
+    const y = f.y + offY;
+    const dx = x * c - y * s;
+    const dy = x * s + y * c;
+    return { x: o.x + dx * sx, y: o.y + dy * sy };
   };
   const pf = points.map(toF);
   const minX = Math.min(...pf.map((q) => q.x));
@@ -105,6 +150,8 @@ export function computeLayout(
   const minY = Math.min(...pf.map((q) => q.y));
   const maxY = Math.max(...pf.map((q) => q.y));
   const minCut = p.minCutCm / 100;
+  const frac = p.pattern === "quinconce" ? ((p.shiftPct ?? 50) / 100) % 1 : base.shift;
+  const progressive = p.pattern === "tiers" || (p.pattern === "quinconce" && p.shiftMode === "progressif");
 
   const cells: Cell[] = [];
   let full = 0;
@@ -113,7 +160,8 @@ export function computeLayout(
   let cutArea = 0;
 
   for (let r = Math.floor(minY / py); r <= Math.floor(maxY / py); r++) {
-    const ro = ((((r * shift) % 1) + 1) % 1) * px;
+    const k = progressive ? (((r * frac) % 1) + 1) % 1 : (((r % 2) + 2) % 2) * frac;
+    const ro = k * px;
     for (let col = Math.floor((minX - ro) / px); col <= Math.floor((maxX - ro) / px); col++) {
       const x0 = col * px + ro;
       const y0 = r * py;
@@ -133,7 +181,15 @@ export function computeLayout(
         cutArea += area;
       }
       if (sliver) slivers++;
-      cells.push({ poly: keepCells ? cl.map(toW) : [], area, full: isFull, w, h, sliver });
+      // dimensions de la coupe exprimées dans le repère du carreau réel (longueur × largeur)
+      let frame: Partial<Cell> = {};
+      if (keepCells) {
+        const ow = toW({ x: x0, y: y0 });
+        const wx = toW({ x: x0 + 1, y: y0 });
+        const wy = toW({ x: x0, y: y0 + 1 });
+        frame = { o: ow, ux: { x: wx.x - ow.x, y: wx.y - ow.y }, uy: { x: wy.x - ow.x, y: wy.y - ow.y }, tl: L, tw: W };
+      }
+      cells.push({ poly: keepCells ? cl.map(toW) : [], area, full: isFull, w: cols ? h : w, h: cols ? w : h, sliver, ...frame });
     }
   }
   const total = full + cut;
@@ -167,7 +223,14 @@ export function optimizeLayout(
     }
   };
   const square = Math.abs(tile.tileL - tile.tileW) < 1e-3;
+  const variants: { pattern: PatternId; shiftPct?: number }[] = [];
   for (const pattern of patterns) {
+    if (pattern === "quinconce") {
+      if (base.pattern === "quinconce") variants.push({ pattern, shiftPct: base.shiftPct ?? 50 });
+      else for (const sp of [25, 33, 50]) variants.push({ pattern, shiftPct: sp });
+    } else variants.push({ pattern });
+  }
+  for (const { pattern, shiftPct } of variants) {
     for (const swap of square ? [false] : [false, true]) {
       const L = swap ? tile.tileW : tile.tileL;
       const W = swap ? tile.tileL : tile.tileW;
@@ -177,12 +240,12 @@ export function optimizeLayout(
       const sx = Math.max(0.03, px / 12);
       const sy = Math.max(0.03, py / 12);
       for (let ox = 0; ox < px - 1e-9; ox += sx)
-        for (let oy = 0; oy < py - 1e-9; oy += sy) test({ ...base, pattern, swap, offX: ox, offY: oy });
+        for (let oy = 0; oy < py - 1e-9; oy += sy) test({ ...base, pattern, ...(shiftPct != null ? { shiftPct } : {}), swap, offX: ox, offY: oy, centered: false });
     }
   }
   // Affinage autour du meilleur candidat
   const c0 = { ...best.p };
   for (let dx = -0.03; dx <= 0.03 + 1e-9; dx += 0.005)
-    for (let dy = -0.03; dy <= 0.03 + 1e-9; dy += 0.005) test({ ...c0, offX: c0.offX + dx, offY: c0.offY + dy });
+    for (let dy = -0.03; dy <= 0.03 + 1e-9; dy += 0.005) test({ ...c0, offX: c0.offX + dx, offY: c0.offY + dy, centered: false });
   return best.p;
 }

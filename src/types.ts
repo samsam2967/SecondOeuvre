@@ -59,7 +59,7 @@ export type SolType = "carrelage" | "parquet" | "souple" | "resine" | "aucun";
 
 export interface Opening {
   id: string;
-  type: "porte" | "fenetre" | "baie" | "porte_fenetre" | "trappe";
+  type: "porte" | "fenetre" | "baie" | "porte_fenetre" | "trappe" | "porte_garage" | "arche";
   width: number;
   height: number;
   wall: "exterieur" | "cloison" | "plafond";
@@ -69,6 +69,49 @@ export interface Opening {
   t?: number;
   /** Hauteur d'allège en mètres (absent = valeur usuelle selon le type). */
   sill?: number;
+}
+
+/** Élément posé sur un mur d'une pièce (prise, interrupteur, sanitaire…), placé et dimensionné à la main dans la vue 3D. */
+export type FixtureKind =
+  | "prise"
+  | "prise_double"
+  | "prise_triple"
+  | "inter"
+  | "inter_double"
+  | "poussoir"
+  | "rj45"
+  | "tv"
+  | "hdmi"
+  | "derivation"
+  | "tableau"
+  | "evier"
+  | "receveur"
+  | "paroi_douche"
+  | "baignoire"
+  | "meuble_vasque"
+  | "vasque"
+  | "wc"
+  | "bati_wc"
+  | "lave_mains"
+  | "lave_linge"
+  | "seche_serviettes"
+  | "radiateur"
+  | "miroir";
+
+export interface Fixture {
+  id: string;
+  kind: FixtureKind;
+  /** Numéro de la paroi de la pièce (comme pour les ouvertures). */
+  edge: number;
+  /** Position du centre le long de la paroi, en mètres depuis le début de la paroi. */
+  u: number;
+  /** Hauteur du bas de l'élément au-dessus du sol fini (m). */
+  z: number;
+  /** Largeur le long du mur, profondeur depuis le mur, hauteur (m). */
+  w: number;
+  d: number;
+  h: number;
+  label?: string;
 }
 
 export interface Pt {
@@ -193,6 +236,12 @@ export interface Room {
   tileMurId?: string;
   paintWallId?: string;
   paintCeilId?: string;
+  /** Largeur des joints de carrelage propre à cette pièce (mm) — absent / 0 = joint global. */
+  jointMm?: number;
+  /** Éléments muraux (prises, interrupteurs, sanitaire…) placés à la main dans la vue 3D — absent = répartition automatique. */
+  fixtures?: Fixture[];
+  /** Éléments retirés de la répartition automatique (clé « kind#n »). */
+  hiddenAuto?: string[];
 }
 
 export interface Partition {
@@ -219,6 +268,9 @@ export interface Floor {
   planScale: number;
   planWidth: number;
   planHeight: number;
+  /** Décalage de cet étage dans la vue 3D (m), pour superposer parfaitement les plans. */
+  offsetX?: number;
+  offsetY?: number;
   rooms: Room[];
   partitions: Partition[];
   /** Éléments électriques posés sur le plan de cet étage (outil « Plan électrique »). */
@@ -476,6 +528,8 @@ export interface CarrelageSettings {
   tileL: number;
   tileW: number;
   jointMm: number;
+  /** Couleur des joints dans la vue 3D (gris par défaut). */
+  jointColor?: string;
   wastePct: number;
   marginPct: number;
   natteL: number;
@@ -632,7 +686,19 @@ export interface TileLayoutData {
   /** Contour de la pièce redessiné, en mètres (même repère que le plan : px ÷ échelle). */
   points: Pt[];
   tileId: string;
-  pattern: "droit" | "demi" | "tiers" | "diag";
+  pattern: "droit" | "demi" | "tiers" | "diag" | "quinconce";
+  /** Quinconce : décalage d'une rangée sur la précédente, en % de la longueur du carreau. */
+  shiftPct?: number;
+  /** « alterne » : une rangée sur deux décalée (vrai quinconce) ; « progressif » : chaque rangée décalée de plus. */
+  shiftMode?: "alterne" | "progressif";
+  /** Rangées parallèles à la longueur du carreau (défaut) ou décalage des colonnes. */
+  shiftAxis?: "rangees" | "colonnes";
+  /** Angle de pose libre (degrés) ajouté au motif. */
+  angleDeg?: number;
+  /** Centrer la pose sur la pièce (coupes égales de chaque côté). */
+  centered?: boolean;
+  /** Pose partie du coin choisi : haut-gauche (défaut), haut-droit, bas-gauche, bas-droit. */
+  origin?: "hg" | "hd" | "bg" | "bd";
   /** Carreau tourné de 90°. */
   swap: boolean;
   /** Décalage de la grille de calepinage (m), dans le repère du carreau. */

@@ -1,5 +1,6 @@
 import { POSTS } from "../data/catalogs";
 import { useStore } from "../store";
+import { fmtDays, HOURS_PER_DAY, projectQuantities, taskEstimate } from "../utils/durations";
 import type { TaskStatus } from "../types";
 import { Btn, Card, H, Select } from "./ui";
 
@@ -15,10 +16,13 @@ const PHASES = [
 ];
 
 export function Conductor() {
-  const { project, setTask, resetTasks } = useStore();
+  const { project, calc, setTask, resetTasks } = useStore();
+  const q = projectQuantities(project, calc);
+  const est = (t: (typeof project.tasks)[number]) => taskEstimate(q, t);
+  const hoursOf = (t: (typeof project.tasks)[number]) => est(t)?.hours ?? t.durationH;
   const done = project.tasks.filter((t) => t.status === "done").length;
   const pct = project.tasks.length ? Math.round((done / project.tasks.length) * 100) : 0;
-  const hours = project.tasks.reduce((s, t) => s + t.durationH, 0);
+  const hours = project.tasks.reduce((s, t) => s + hoursOf(t), 0);
 
   return (
     <div>
@@ -34,7 +38,7 @@ export function Conductor() {
             <div className="h-full bg-terra" style={{ width: `${pct}%` }} />
           </div>
           <div className="mt-1 text-xs text-stone-500">
-            {done}/{project.tasks.length} tâches · ~{hours} h estimées
+            {done}/{project.tasks.length} tâches · ~{Math.round(hours)} h ≈ {fmtDays(hours / HOURS_PER_DAY)} estimés d'après les quantités de ton projet
           </div>
         </div>
         <Btn
@@ -69,8 +73,9 @@ export function Conductor() {
                       <div className={`font-semibold ${t.status === "done" ? "text-stone-400 line-through" : ""}`}>{t.title}</div>
                       <p className="mt-1 text-sm leading-relaxed text-stone-600">{t.detail}</p>
                       <div className="mt-1 text-[11px] uppercase tracking-wider text-stone-400">
-                        {t.post === "general" ? "Général" : POSTS.find((p) => p.id === t.post)?.label} · {t.durationH} h
+                        {t.post === "general" ? "Général" : POSTS.find((p) => p.id === t.post)?.label} · {fmtDays(hoursOf(t) / HOURS_PER_DAY)}
                       </div>
+                      {est(t) && <div className="mt-0.5 text-xs font-semibold text-forest">Calcul : {est(t)!.basis} (journée de {HOURS_PER_DAY} h, une personne)</div>}
                     </div>
                     <Select value={t.status} onChange={(e) => setTask(t.id, { status: e.target.value as TaskStatus })}>
                       <option value="todo">À faire</option>

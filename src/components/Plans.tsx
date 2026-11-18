@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Plus, Trash2, Wand2 } from "lucide-react";
 import { PLAQUE_INFO, ROOM_TYPES } from "../data/catalogs";
 import { useStore } from "../store";
-import type { Opening, Partition, PlaqueType, Pt, Room, RoomType, SolType } from "../types";
+import type { Floor, Opening, Partition, PlaqueType, Pt, Room, RoomType, SolType } from "../types";
 import { analyzeFloorPlan } from "../utils/analyzePlan";
 import { fmtD } from "../utils/format";
 import { orthogonalize, pointsForRoom, setEdgeLength, syncFromPoints } from "../utils/geometry";
@@ -145,6 +145,8 @@ export function Plans() {
           <Plus size={14} /> Étage
         </Btn>
       </div>
+
+      {project.floors.length > 1 && <FloorAlign floors={project.floors} floorId={floor.id} onPatch={(patch) => updateFloor(floor.id, patch)} />}
 
       <div className="grid gap-4 xl:grid-cols-[1fr_340px]">
         <div className="space-y-4">
@@ -441,6 +443,8 @@ function RoomEditor({
   onPoints: (pts: Pt[]) => void;
   onRemove: () => void;
 }) {
+  const { project } = useStore();
+  const globalJoint = project.settings.carrelage.jointMm;
   const s = roomSurfaces(room);
   const pts = pointsForRoom(room, scale);
   const edges = roomEdges(room, scale);
@@ -681,6 +685,28 @@ function RoomEditor({
             <Num value={room.tileWallHeight} onChange={(n) => onChange({ tileWallHeight: n })} suffix="m" />
           </Field>
         )}
+        {(room.tileFloor || room.tileWalls) && (
+          <Field label="Joints de carrelage de cette pièce">
+            <div className="flex items-center gap-2">
+              <Num value={room.jointMm ?? 0} onChange={(n) => onChange({ jointMm: Math.max(0, n) })} step={0.5} suffix="mm" />
+              <span className="text-[11px] text-stone-500">0 = joint global ({globalJoint} mm)</span>
+            </div>
+          </Field>
+        )}
+        {(room.fixtures?.length ?? 0) > 0 && (
+          <div className="rounded-lg border border-rule bg-white/70 p-2 text-[11px] text-stone-600">
+            <div className="mb-1 font-semibold uppercase tracking-[0.12em] text-stone-500">Éléments muraux placés en 3D ({room.fixtures!.length})</div>
+            {room.fixtures!.map((f) => (
+              <div key={f.id} className="flex items-center justify-between gap-2 py-0.5">
+                <span>{f.label ?? f.kind} — paroi {f.edge + 1}, à {Math.round(f.u * 100)} cm, h {Math.round(f.z * 100)} cm</span>
+                <button className="text-stone-400 hover:text-red-700" onClick={() => onChange({ fixtures: room.fixtures!.filter((x) => x.id !== f.id) })}>
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+            <p className="mt-1 text-stone-500">Modifiables dans la vue 3D de chaque poste : ce sont les mêmes données.</p>
+          </div>
+        )}
         <div>
           <div className="mb-2 flex items-center justify-between">
             <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Ouvertures</span>
@@ -762,11 +788,21 @@ function OpeningRow({
   return (
     <div className="mb-2 rounded-lg border border-rule bg-white/70 p-2">
       <div className="grid grid-cols-[1fr_70px_70px_28px] items-end gap-1">
-        <Select value={o.type} onChange={(e) => onChange({ type: e.target.value as Opening["type"] })}>
+        <Select
+          value={o.type}
+          onChange={(e) => {
+            const type = e.target.value as Opening["type"];
+            const preset: Partial<Opening> =
+              type === "porte_garage" ? { width: 2.4, height: 2.0, wall: "exterieur" } : type === "arche" ? { width: 1.2, height: 2.1, wall: "cloison" } : {};
+            onChange({ type, ...preset });
+          }}
+        >
           <option value="porte">Porte</option>
           <option value="fenetre">Fenêtre</option>
           <option value="baie">Baie</option>
           <option value="porte_fenetre">Porte-fenêtre</option>
+          <option value="porte_garage">Porte de garage</option>
+          <option value="arche">Arche / passage</option>
           <option value="trappe">Trappe</option>
         </Select>
         <Num value={o.width} onChange={(n) => onChange({ width: n })} step={0.05} />
@@ -869,5 +905,69 @@ function PartEditor({
         </Btn>
       </div>
     </Card>
+  );
+}
+
+/** Emprise (m) de toutes les pièces d'un étage, dans le repère de son plan. */
+function floorBox(f: Floor) {
+  const sc = f.planScale || 40;
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const r of f.rooms)
+    for (const p of pointsForRoom(r, sc)) {
+      xs.push(p.x / sc);
+      ys.push(p.y / sc);
+    }
+  if (!xs.length) return null;
+  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+}
+
+function FloorAlign({ floors, floorId, onPatch }: { floors: Floor[]; floorId: string; onPatch: (p: Partial<Floor>) => void }) {
+  const f = floors.find((x) => x.id === floorId)!;
+  const ref = [...floors].sort((a, b) => a.level - b.level)[0];
+  const isRef = ref.id === f.id;
+  const ox = f.offsetX ?? 0;
+  const oy = f.offsetY ?? 0;
+  const align = (mode: "corner" | "center") => {
+    const a = floorBox(f);
+    const b = floorBox(ref);
+    if (!a || !b) return;
+    const bx = b.x0 + (ref.offsetX ?? 0);
+    const by = b.y0 + (ref.offsetY ?? 0);
+    if (mode === "corner") onPatch({ offsetX: Math.round((bx - a.x0) * 100) / 100, offsetY: Math.round((by - a.y0) * 100) / 100 });
+    else
+      onPatch({
+        offsetX: Math.round((bx + (b.x1 - b.x0) / 2 - (a.x0 + (a.x1 - a.x0) / 2)) * 100) / 100,
+        offsetY: Math.round((by + (b.y1 - b.y0) / 2 - (a.y0 + (a.y1 - a.y0) / 2)) * 100) / 100,
+      });
+  };
+  return (
+    <div className="mb-4 rounded-xl border border-rule bg-white/70 p-3">
+      <div className="mb-1 text-sm font-semibold">Superposition des étages (vue 3D)</div>
+      {isRef ? (
+        <p className="text-xs text-stone-500">
+          « {f.name} » sert de référence : les autres étages se calent dessus. Choisis un autre étage pour régler sa position.
+        </p>
+      ) : (
+        <>
+          <p className="mb-2 text-xs text-stone-500">
+            Chaque plan a sa propre origine : si « {f.name} » n'est pas exactement au-dessus de « {ref.name} » dans la vue 3D, cale-le ici (cm). Les pièces, portes, appareillages et gaines de cet étage suivent.
+          </p>
+          <div className="flex flex-wrap items-end gap-2 text-xs">
+            <label className="font-semibold">
+              Décalage X (cm)
+              <input className="ml-1 w-20 rounded-lg border border-black/15 bg-white px-2 py-1 text-sm" type="number" step={1} value={Math.round(ox * 100)} onChange={(e) => onPatch({ offsetX: Number(e.target.value) / 100 })} />
+            </label>
+            <label className="font-semibold">
+              Décalage Y (cm)
+              <input className="ml-1 w-20 rounded-lg border border-black/15 bg-white px-2 py-1 text-sm" type="number" step={1} value={Math.round(oy * 100)} onChange={(e) => onPatch({ offsetY: Number(e.target.value) / 100 })} />
+            </label>
+            <Btn variant="ghost" onClick={() => align("corner")}>Aligner le coin haut-gauche</Btn>
+            <Btn variant="ghost" onClick={() => align("center")}>Aligner les centres</Btn>
+            <Btn variant="ghost" onClick={() => onPatch({ offsetX: 0, offsetY: 0 })}>Remettre à 0</Btn>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
