@@ -24,7 +24,8 @@ export function Budget() {
   const ordered = project.expenses.filter((e) => e.status === "commande").reduce((s, e) => s + e.amount, 0);
   const planned = project.expenses.filter((e) => e.status === "prevu").reduce((s, e) => s + e.amount, 0);
   const bankSum = (st: BankStatus) => project.expenses.filter((e) => (e.bankStatus ?? "non_demande") === st).reduce((a, e) => a + e.amount, 0);
-  const max = Math.max(calc.costWithMarginTotal, paid + ordered + planned, 1);
+  // Échelle des barres : le poste le plus cher occupe presque toute la ligne (96 %), les autres s'y adaptent.
+  const maxPost = Math.max(1, ...POSTS.map((p) => calc.costWithMarginByPost[p.id] ?? 0));
 
   return (
     <div>
@@ -43,14 +44,14 @@ export function Budget() {
       <Card className="mb-4">
         <h2 className="font-display mb-3 text-lg font-bold">Répartition des postes</h2>
         <p className="mb-3 text-xs text-stone-500">
-          Pertes incluses dans les quantités · marges ajoutées au budget (réglables dans Matériaux, tableau Pertes & marges).
+          Pertes incluses dans les quantités · marges ajoutées au budget (réglables dans Matériaux, tableau Pertes & marges). L'échelle des barres est ajustée sur le poste le plus cher, pour comparer les postes entre eux.
         </p>
         <div className="space-y-2">
           {POSTS.map((p) => {
             const v = calc.costWithMarginByPost[p.id];
             const base = calc.costByPost[p.id];
             const margin = calc.marginByPost[p.id];
-            const w = (v / max) * 100;
+            const w = v > 0 ? Math.max(1.5, (v / maxPost) * 96) : 0;
             return (
               <div key={p.id} className="grid grid-cols-[140px_1fr_90px] items-center gap-2 text-sm">
                 <div className="truncate font-medium">{p.short}</div>

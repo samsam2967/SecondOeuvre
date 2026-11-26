@@ -1,3 +1,4 @@
+import { boughtQty, nowQty, remainQty } from "./shopping";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { POSTS } from "../data/catalogs";
@@ -41,7 +42,9 @@ function footer(doc: jsPDF) {
 export function exportShoppingPdf(project: Project, calc: CalcResult, post?: PostId, onlyKeys?: string[]) {
   const doc = new jsPDF();
   const source = post ? calc.byPost[post] : calc.items;
-  const items = onlyKeys ? source.filter((i) => onlyKeys.includes(lineKey(i))) : source;
+  const picked = onlyKeys ? source.filter((i) => onlyKeys.includes(lineKey(i))) : source;
+  // la liste reprend les quantités « à acheter maintenant » (et non le total prévu) ; ce qui est déjà acheté n'y figure plus
+  const rows = picked.map((i) => ({ i, qty: nowQty(project, i) })).filter((x) => x.qty > 0);
   const title = post ? `Liste de courses — ${POSTS.find((p) => p.id === post)?.label}` : "Liste de courses — chantier";
   header(doc, title, project);
 
@@ -52,37 +55,42 @@ export function exportShoppingPdf(project: Project, calc: CalcResult, post?: Pos
     14,
     36,
   );
+  const total = rows.reduce((s, x) => s + x.qty * x.i.unitPrice, 0);
+  const planned = picked.reduce((s, i) => s + lineTotal(i), 0);
   doc.text(
-    `${items.length} ligne(s) retenue(s) · Total : ${fmtE(items.reduce((s, i) => s + lineTotal(i), 0))} TTC indicatif (TVA ${project.settings.tva} %).`,
+    `${rows.length} ligne(s) à acheter maintenant · Total : ${fmtE(total)} TTC indicatif (TVA ${project.settings.tva} %) · prévu au total sur ces postes : ${fmtE(planned)}.`,
     14,
     42,
   );
 
   const links = project.settings.productLinks ?? {};
-  const body = items.map((i) => {
+  const body = rows.map(({ i, qty }) => {
     const url = (i.linkKey ? links[`mat:${i.post}:${i.linkKey}`] : undefined) ?? links[lineKey(i)];
     const shortUrl = url && url.length > 70 ? `${url.slice(0, 67)}…` : url;
+    const bought = boughtQty(project, i);
+    const reste = remainQty(project, i) - qty;
+    const info = bought > 0 || reste > 0.001 ? `\nprévu ${fmtD(i.quantity, 2)} · déjà acheté ${fmtD(bought, 2)} · restera ${fmtD(Math.max(0, reste), 2)} ${i.unit}` : "";
     return [
       POSTS.find((p) => p.id === i.post)?.short ?? i.post,
       i.category,
-      `${i.name}${i.spec ? ` (${i.spec})` : ""}${shortUrl ? `\n→ ${shortUrl}` : ""}`,
-      `${fmtD(i.quantity, 2)} ${i.unit}`,
+      `${i.name}${i.spec ? ` (${i.spec})` : ""}${info}${shortUrl ? `\n→ ${shortUrl}` : ""}`,
+      `${fmtD(qty, 2)} ${i.unit}`,
       fmtE(i.unitPrice),
-      fmtE(lineTotal(i)),
+      fmtE(qty * i.unitPrice),
       "☐",
     ];
   });
 
   autoTable(doc, {
     startY: 48,
-    head: [["Poste", "Famille", "Désignation", "Qté", "PU", "Total", "OK"]],
+    head: [["Poste", "Famille", "Désignation", "À acheter", "PU", "Total", "OK"]],
     body,
     styles: { fontSize: 7.5, cellPadding: 1.6, textColor: [40, 36, 32] },
     headStyles: { fillColor: [196, 92, 38], textColor: 255, fontStyle: "bold" },
     alternateRowStyles: { fillColor: [250, 246, 240] },
     columnStyles: {
       0: { cellWidth: 18 },
-      3: { halign: "right" },
+      3: { halign: "right", fontStyle: "bold" },
       4: { halign: "right" },
       5: { halign: "right" },
       6: { cellWidth: 10, halign: "center" },

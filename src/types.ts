@@ -59,7 +59,7 @@ export type SolType = "carrelage" | "parquet" | "souple" | "resine" | "aucun";
 
 export interface Opening {
   id: string;
-  type: "porte" | "fenetre" | "baie" | "porte_fenetre" | "trappe" | "porte_garage" | "arche";
+  type: "porte" | "fenetre" | "baie" | "porte_fenetre" | "trappe" | "porte_garage" | "arche" | "passage";
   width: number;
   height: number;
   wall: "exterieur" | "cloison" | "plafond";
@@ -210,6 +210,12 @@ export interface Room {
   tileWalls: boolean;
   tileWallHeight: number;
   floorHeating: boolean;
+  /** Isolant du sol de cette pièce (absent = isolant du sol des réglages Chauffage / Isolation). */
+  floorInsulId?: string;
+  /** Épaisseur d'isolant sous le sol de cette pièce, en mm (absent = épaisseur du catalogue). */
+  floorInsulMm?: number;
+  /** Zones que l'on ne souhaite pas chauffer dans la pièce (mètres, depuis le coin haut-gauche de la pièce). */
+  heatExcl?: HeatExcl[];
   solType: SolType;
   notes: string;
   x: number;
@@ -220,6 +226,14 @@ export interface Room {
   areaM2: number;
   perimeterM: number;
   exteriorEdges: number[];
+  /** Parois extérieures réglées à la main : la détection automatique des murs mitoyens n'y touche pas. */
+  extLocked?: boolean;
+  /** Parois extérieures déduites automatiquement des pièces voisines. */
+  extAuto?: boolean;
+  /** Cloisons non isolées : numéros de parois mises à false (absent = isolée avec l'isolant de cloison). */
+  wallInsul?: Record<string, boolean>;
+  /** Murs extérieurs sans brique : isolant et plaques sur ossature (numéro de paroi → "ossature"). Absent = brique + isolant + placo. */
+  wallStruct?: Record<string, "ossature" | "nu">;
   wallTypes: Record<string, PlaqueType | "none">;
   /** Prix spécifiques à la pièce — 0 = tarif global de l'onglet Matériaux. */
   prixCarrelageM2: number;
@@ -277,6 +291,64 @@ export interface Floor {
   elecDevices?: ElecDevice[];
   /** Éléments VMC posés sur le plan de cet étage (outil « Plan des gaines VMC »). */
   vmcDevices?: VmcDevice[];
+  /** Escaliers qui partent de cet étage (outil « Plans & pièces »). */
+  stairs?: Stair[];
+  /** Collecteurs du plancher chauffant (absent = placement automatique). */
+  collectors?: HeatCollector[];
+}
+
+export interface HeatExcl {
+  id: string;
+  u: number;
+  v: number;
+  w: number;
+  h: number;
+}
+
+/** Collecteur du plancher chauffant, en pixels du plan. */
+export interface HeatCollector {
+  id: string;
+  x: number;
+  y: number;
+}
+
+export type StairKind = "droit" | "quart" | "demi";
+export type StairMaterial = "bois" | "beton" | "metal" | "pierre";
+
+/** Un escalier posé sur le plan d'un étage, rendu en 3D à l'échelle réelle. */
+export interface Stair {
+  id: string;
+  name: string;
+  /** Droit, quart tournant (palier d'angle) ou demi-tour (deux volées parallèles). */
+  kind: StairKind;
+  /** Pied de l'escalier (côté droit de la première marche), en pixels du plan. */
+  x: number;
+  y: number;
+  /** Sens de la montée de la première volée, en degrés (0 = vers la droite du plan, 90 = vers le bas). */
+  angle: number;
+  /** Nombre de marches (contremarches) pour monter la hauteur totale. */
+  steps: number;
+  /** Hauteur à monter, en mètres. */
+  rise: number;
+  /** Largeur des marches, en mètres. */
+  width: number;
+  /** Giron (profondeur d'une marche), en mètres. */
+  tread: number;
+  /** Côté du tournant (quart et demi-tour). */
+  turn: "gauche" | "droite";
+  /** Escalier droit : montée en continu ou avec un palier intermédiaire. */
+  landing: "continu" | "palier";
+  /** Nombre de marches avant le palier. */
+  landingAfter: number;
+  /** Profondeur du palier (m). */
+  landingDepth: number;
+  /** Jour entre les deux volées d'un demi-tour (m). */
+  gap: number;
+  material: StairMaterial;
+  color: string;
+  /** Carrelage posé sur les marches. */
+  tiled: boolean;
+  tileColor: string;
 }
 
 export type ElecDeviceKind =
@@ -568,6 +640,14 @@ export interface Settings {
   quincaillerie: QuincaillerieSettings;
   isolants: IsolantProduct[];
   shoppingSelection: Record<string, boolean>;
+  /** Épaisseur du mur porteur (brique ou parpaing) dessiné sur le plan, en mm. */
+  briqueMm?: number;
+  /** Quantité que l'on compte acheter maintenant, par ligne (absent = tout ce qui reste). */
+  shoppingNow?: Record<string, number>;
+  /** Quantité déjà achetée, par ligne. */
+  shoppingBought?: Record<string, number>;
+  /** Historique des achats validés (pour les annuler et suivre le budget). */
+  shoppingBatches?: { id: string; date: string; lines: { key: string; qty: number }[]; amount: number; expenseIds: string[] }[];
   /** Liens d'achat : clé `mat:post:priceKey` (Matériaux) ou lineKey (ligne précise). */
   productLinks: Record<string, string>;
   /** Matériaux personnalisés (page Matériaux), par poste. */
@@ -670,6 +750,7 @@ export type PageId =
   | "courses"
   | "recap"
   | "guideelec"
+  | "guidevmc"
   | "planelec"
   | "budget"
   | "conducteur"
@@ -686,7 +767,7 @@ export interface TileLayoutData {
   /** Contour de la pièce redessiné, en mètres (même repère que le plan : px ÷ échelle). */
   points: Pt[];
   tileId: string;
-  pattern: "droit" | "demi" | "tiers" | "diag" | "quinconce";
+  pattern: "droit" | "demi" | "tiers" | "diag" | "quinconce" | "chevron" | "batons";
   /** Quinconce : décalage d'une rangée sur la précédente, en % de la longueur du carreau. */
   shiftPct?: number;
   /** « alterne » : une rangée sur deux décalée (vrai quinconce) ; « progressif » : chaque rangée décalée de plus. */

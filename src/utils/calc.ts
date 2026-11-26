@@ -13,6 +13,8 @@ import { vmcPlanTotals } from "./vmcPlan";
 import { newSink, takeRef, trackPrices, type PriceSink } from "./priceTrack";
 import { resolveExtra } from "./extras";
 import { uid } from "./id";
+import { sharedWalls, wallInsulated, withAdjacency } from "./adjacency";
+import { roomLayerAreas } from "./wallLayers";
 import { allPartitions, allRooms, defaultElec, partitionArea, roomEdges, roomSurfaces, totals } from "./surfaces";
 
 /** Suivi des prix lus pendant le calcul en cours (voir priceTrack.ts). */
@@ -244,12 +246,17 @@ export interface CalcResult {
   };
 }
 
+/** Surface d'une pièce que l'on ne veut pas chauffer (zones exclues). */
+export const exclArea = (r: { heatExcl?: { w: number; h: number }[] }) => (r.heatExcl ?? []).reduce((s, e) => s + Math.max(0, e.w) * Math.max(0, e.h), 0);
+/** Surface réellement chauffée d'une pièce. */
+export const heatArea = (r: { length: number; width: number; heatExcl?: { w: number; h: number }[] }) => Math.max(0, r.length * r.width - exclArea(r));
+
 export function compute(project: Project): CalcResult {
   const sink = newSink();
   const prev = activeSink;
   activeSink = sink;
   try {
-    return computeInner({ ...project, settings: trackPrices(project.settings, sink) });
+    return computeInner({ ...withAdjacency(project), settings: trackPrices(project.settings, sink) });
   } finally {
     activeSink = prev;
   }
@@ -276,10 +283,20 @@ function computeInner(project: Project): CalcResult {
     return { l, w, m2: Math.max(0.1, l * w) };
   };
 
+  // Surfaces couche par couche des murs extérieurs (angles en onglet, comme sur le plan)
+  const murIsoT = findIsolant(isolants, S.isolation.isolantMurId).thickness / 1000;
+  let isoTotal = 0;
+  let vaporTotal = 0;
+
   const perRoom = rooms.map((room) => {
     const floorName = project.floors.find((f) => f.id === room.floorId)?.name ?? "";
     const rs = roomSurfaces(room);
-    const placoWalls = room.placoWalls ? rs.wallsNet : 0;
+    // murs extérieurs sans brique : une plaque supplémentaire côté extérieur, comme sur une cloison
+    const layers = roomLayerAreas(room, scaleByFloor.get(room.floorId) ?? roomScale, murIsoT);
+    isoTotal += layers.isoM2;
+    vaporTotal += layers.vaporM2;
+    const outerPlaco = layers.outerM2;
+    const placoWalls = room.placoWalls ? rs.wallsNet + outerPlaco : 0;
     const placoCeil = room.placoCeiling ? rs.ceiling : 0;
     const placoM2 = placoWalls + placoCeil;
     const plaqueM2 = plaqueSize(room.placoType).m2;
@@ -353,6 +370,17 @@ function computeInner(project: Project): CalcResult {
       cur.rooms.push(room.name + " (plafond)");
       byPlaque.set(key, cur);
     }
+    // murs extérieurs sans brique : plaque supplémentaire côté extérieur
+    if (room.placoWalls) {
+      const outer = roomLayerAreas(room, scaleByFloor.get(room.floorId) ?? roomScale, murIsoT).outerM2;
+      if (outer > 0) {
+        const key = room.placoType === "hydro" ? "hydro" : "ba13";
+        const cur = byPlaque.get(key) ?? { m2: 0, rooms: [] };
+        cur.m2 += outer;
+        cur.rooms.push(room.name + " (face extérieure sans brique)");
+        byPlaque.set(key, cur);
+      }
+    }
     const extLen = edges.filter((e) => e.exterior && !e.passage).reduce((s, e) => s + e.lengthM, 0);
     if (extLen > 0) resilienteM += extLen;
     corniereM += edges.filter((e) => !e.passage).length * room.height * 0.25;
@@ -367,8 +395,7 @@ function computeInner(project: Project): CalcResult {
   }
 
   // Isolation : surfaces extérieures par type de paroi (les passages ne s'isolent pas)
-  let extAreaTotal = 0;
-  for (const v of roomExteriorByType.values()) extAreaTotal += v;
+  const extAreaTotal = isoTotal;
 
   // Cloisons — 2 faces
   let cloisonM2ByType: Record<string, number> = {};
@@ -379,9 +406,14 @@ function computeInner(project: Project): CalcResult {
   let rail70m = 0;
   let doorReinforcements = 0;
 
+  // Une cloison saisie à la main entre deux pièces dessinées qui se touchent : les plaques de ses deux faces
+  // sont déjà comptées dans chaque pièce, on ne les recompte pas (l'ossature et l'isolant restent comptés).
+  const touching = new Set<string>();
+  for (const f of project.floors) for (const w of sharedWalls(f)) touching.add([w.roomAId, w.roomBId].sort().join("|"));
   for (const p of parts) {
     const face = partitionArea(p);
-    const faces = face * 2;
+    const facesCoveredByRooms = !!p.roomAId && !!p.roomBId && touching.has([p.roomAId, p.roomBId].sort().join("|"));
+    const faces = facesCoveredByRooms ? 0 : face * 2;
     const t =
       p.type === "hydro" || p.type === "hydro_phonique"
         ? "hydro"
@@ -402,6 +434,41 @@ function computeInner(project: Project): CalcResult {
     else rail70m += rails;
     resilienteM += p.length * 2 + p.height * 2;
     doorReinforcements += p.doorCount;
+  }
+
+  let autoCloisonIsolM2 = 0;
+  // Murs extérieurs sans brique (ossature) : rails et montants comptés comme pour une cloison
+  for (const f of project.floors)
+    for (const r of f.rooms)
+      roomEdges(r, f.planScale || 40).forEach((e) => {
+        if (!e.exterior || e.passage || r.wallStruct?.[String(e.index)] !== "ossature") return;
+        const h = r.height || 2.5;
+        montant70m += (Math.ceil(e.lengthM / S.placo.montantSpacing) + 1) * h;
+        rail70m += e.lengthM * 2;
+        resilienteM += e.lengthM * 2 + h * 2;
+      });
+  // Cloisons détectées entre deux pièces qui se touchent : l'ossature est comptée une seule fois par cloison
+  // (les plaques des deux faces sont déjà comptées dans chaque pièce). Un passage déclaré ne compte pas de cloison,
+  // et une cloison déjà saisie à la main entre les deux mêmes pièces n'est pas recomptée.
+  for (const f of project.floors) {
+    for (const w of sharedWalls(f)) {
+      if (w.passage) continue;
+      if (f.partitions.some((p) => (p.roomAId === w.roomAId && p.roomBId === w.roomBId) || (p.roomAId === w.roomBId && p.roomBId === w.roomAId))) continue;
+      const ra = f.rooms.find((r) => r.id === w.roomAId);
+      const h = ra?.height || f.height || 2.5;
+      montant70m += (Math.ceil(w.lengthM / S.placo.montantSpacing) + 1) * h;
+      rail70m += w.lengthM * 2;
+      resilienteM += w.lengthM * 2 + h * 2;
+      // isolant de cloison : par défaut sur toutes les cloisons détectées, sauf celles décochées ; portes et ouvertures déduites
+      if (wallInsulated(f, w)) {
+        const rb = f.rooms.find((r) => r.id === w.roomBId);
+        const open = [ra?.openings.filter((o) => o.edge === w.edgeA), rb?.openings.filter((o) => o.edge === w.edgeB)]
+          .flat()
+          .filter((o): o is NonNullable<typeof o> => !!o && o.wall === "cloison")
+          .reduce((a, o) => a + o.width * o.height, 0);
+        autoCloisonIsolM2 += Math.max(0, w.lengthM * h - open);
+      }
+    }
   }
 
   const addPlaques = (type: string, m2: number, note: string) => {
@@ -521,13 +588,13 @@ function computeInner(project: Project): CalcResult {
     items.push(item("isolation", "Système de pose", "Appuis d'isolation", `entraxe ${S.isolation.appuisHSpacing * 100} cm / ${S.isolation.appuisVSpacing} m`, "u", appuis, S.isolation.prices.appui));
     items.push(item("isolation", "Système de pose", `Montants / fourrures F530 (${S.isolation.railLength || 3} m)`, "GTL + support placo", "u", Math.ceil(waste(montants * 2.5, 8) / (S.isolation.railLength || 3)), S.isolation.prices.montant_f530, `GTL ${S.isolation.gtlMm} mm`));
     items.push(item("isolation", "Système de pose", "Chevilles isolation / frappe", "boîte 100", "boîte", Math.ceil(appuis / 100), S.isolation.prices.cheville_isolation_100));
-    items.push(item("isolation", "Étanchéité à l'air", "Pare-vapeur / frein-vapeur", "m²", "m²", Math.ceil(waste(extM2, 15)), S.isolation.prices.pare_vapeur_m2, "Côté chaud, continu, marouflé"));
+    items.push(item("isolation", "Étanchéité à l'air", "Pare-vapeur / frein-vapeur", "m²", "m²", Math.ceil(waste(vaporTotal > 0.05 ? vaporTotal : extM2, 15)), S.isolation.prices.pare_vapeur_m2, "Côté chaud, continu, marouflé"));
     items.push(item("isolation", "Étanchéité à l'air", "Scotch d'étanchéité", "rouleau 60 m", "rouleau", Math.max(2, Math.ceil(extM2 / 25)), S.isolation.prices.scotch_etanche_60m));
     items.push(item("isolation", "Étanchéité à l'air", "Mastic d'étanchéité", "cartouche", "u", Math.max(4, Math.ceil(extM2 / 20)), S.isolation.prices.mastic_etanche));
     items.push(item("isolation", "Étanchéité à l'air", "Rosaces / manchons étanches", "passages de câbles", "u", Math.max(10, rooms.length * 4), S.isolation.prices.rosace_etanche));
   }
 
-  const cloisonIsolM2 = parts.filter((p) => p.insulated).reduce((s, p) => s + partitionArea(p), 0);
+  const cloisonIsolM2 = parts.filter((p) => p.insulated).reduce((s, p) => s + partitionArea(p), 0) + autoCloisonIsolM2;
   if (cloisonIsolM2 > 0.1) {
     const panelM2 = cloisonIsolant.panelL * cloisonIsolant.panelW;
     items.push(
@@ -545,21 +612,27 @@ function computeInner(project: Project): CalcResult {
     );
   }
 
-  const heatFloorM2 = rooms.filter((r) => r.floorHeating).reduce((s, r) => s + r.length * r.width, 0);
-  const solM2ForIsol = heatFloorM2 > 0 ? heatFloorM2 : 0;
-  if (solM2ForIsol > 0) {
-    const panelM2 = Math.max(0.1, solIsolant.panelL * solIsolant.panelW);
+  // Isolant du sol : un choix par pièce (à défaut, celui des réglages), une ligne par produit
+  const solGroups = new Map<string, number>();
+  for (const r of rooms.filter((x) => x.floorHeating)) {
+    const id = r.floorInsulId || S.isolation.isolantSolId;
+    solGroups.set(id, (solGroups.get(id) ?? 0) + r.length * r.width);
+  }
+  for (const [isoId, m2] of solGroups) {
+    if (m2 <= 0) continue;
+    const iso = findIsolant(isolants, isoId);
+    const panelM2 = Math.max(0.1, iso.panelL * iso.panelW);
     items.push(
       item(
         "isolation",
         "Sol / plancher chauffant",
-        solIsolant.name,
-        `${solIsolant.thickness} mm — R = ${rValue(solIsolant.lambda, solIsolant.thickness).toFixed(2)}`,
+        iso.name,
+        `${iso.thickness} mm — R = ${rValue(iso.lambda, iso.thickness).toFixed(2)}`,
         "panneau",
-        Math.ceil(waste(solM2ForIsol, S.isolation.wastePct) / panelM2),
-        solIsolant.priceM2 * panelM2,
+        Math.ceil(waste(m2, S.isolation.wastePct) / panelM2),
+        iso.priceM2 * panelM2,
         "",
-        { productId: solIsolant.id },
+        { productId: iso.id },
       ),
     );
   }
@@ -930,7 +1003,7 @@ function computeInner(project: Project): CalcResult {
   }
 
   // ----- CHAUFFAGE -----
-  const heatM2 = rooms.filter((r) => r.floorHeating).reduce((s, r) => s + r.length * r.width, 0);
+  const heatM2 = rooms.filter((r) => r.floorHeating).reduce((s, r) => s + heatArea(r), 0);
   const pasM = S.chauffage.pasMm / 1000;
   const tubeM = pasM > 0 ? waste(heatM2 / pasM, S.chauffage.wastePct) : 0;
   const loops = Math.max(1, Math.ceil(tubeM / S.chauffage.maxLoopM));
@@ -1469,7 +1542,8 @@ export function roomMaterials(project: Project, roomId: string): RoomMaterialLin
     const extOpen = room.openings
       .filter((o) => o.wall === "exterieur")
       .reduce((s, o) => s + o.width * o.height, 0);
-    const extM2 = Math.max(0, extLen * room.height - extOpen);
+    void extOpen;
+    const extM2 = roomLayerAreas(room, scale, (isolants.find((i) => i.id === S.isolation.isolantMurId) ?? isolants[0]).thickness / 1000).isoM2;
     const iso = isolants.find((i) => i.id === S.isolation.isolantMurId) ?? isolants[0];
     const panelM2 = Math.max(0.1, iso.panelL * iso.panelW);
     out.push({
@@ -1486,7 +1560,7 @@ export function roomMaterials(project: Project, roomId: string): RoomMaterialLin
     const nMont = Math.ceil(extLen / S.isolation.appuisHSpacing) + 1;
     const nVert = Math.max(2, Math.ceil(room.height / S.isolation.appuisVSpacing) + 1);
     out.push({ post: "isolation", name: "Appuis d'isolation", qty: nMont * nVert, unit: "u", unitPrice: S.isolation.prices.appui });
-    out.push({ post: "isolation", name: "Pare-vapeur", qty: Math.ceil(waste(extM2, 15)), unit: "m²", unitPrice: S.isolation.prices.pare_vapeur_m2 });
+    out.push({ post: "isolation", name: "Pare-vapeur", qty: Math.ceil(waste(roomLayerAreas(room, scale, (isolants.find((i) => i.id === S.isolation.isolantMurId) ?? isolants[0]).thickness / 1000).vaporM2, 15)), unit: "m²", unitPrice: S.isolation.prices.pare_vapeur_m2 });
   }
 
   // ---- ÉLECTRICITÉ ----
@@ -1701,7 +1775,8 @@ export function roomMaterials(project: Project, roomId: string): RoomMaterialLin
   // ---- ISOLATION : système de pose et étanchéité à l'air de la pièce ----
   if (extLen > 0.05) {
     const extOpen2 = room.openings.filter((o) => o.wall === "exterieur").reduce((s, o) => s + o.width * o.height, 0);
-    const extM2b = Math.max(0, extLen * room.height - extOpen2);
+    void extOpen2;
+    const extM2b = roomLayerAreas(room, scale, (isolants.find((i) => i.id === S.isolation.isolantMurId) ?? isolants[0]).thickness / 1000).isoM2;
     const I = S.isolation;
     const montants = Math.ceil(extLen / I.montantSpacing);
     const nMont2 = Math.ceil(extLen / I.appuisHSpacing) + 1;
@@ -1730,25 +1805,26 @@ export function roomMaterials(project: Project, roomId: string): RoomMaterialLin
   if (room.floorHeating) {
     const H = S.chauffage;
     const pasM2 = (H.pasMm || 150) / 1000;
-    const tubeRoom = waste(rs.floor / pasM2, H.wastePct);
+    const heatFloor = Math.max(0, rs.floor - exclArea(room));
+    const tubeRoom = waste(heatFloor / pasM2, H.wastePct);
     const loopsRoom = tubeRoom / Math.max(1, H.maxLoopM);
     const add2 = (name: string, qty: number, unit: string, price: number, ref: string, note?: string) => {
       if (qty > 0.001) out.push({ post: "chauffage", name, qty: Math.round(qty * 100) / 100, unit, unitPrice: price, ref, note });
     };
     add2("Sortie de collecteur (départ+retour)", loopsRoom, "u", H.prices.collecteur_sortie, "Sortie de collecteur (départ+retour)", "part de la pièce (boucles = tube ÷ longueur max)");
     add2("Servomoteur électrothermique", loopsRoom, "u", H.prices.servomoteur, "Servomoteur électrothermique", "part de la pièce (1 par boucle)");
-    add2("Agrafes / cavaliers de fixation", (rs.floor * 8) / 100, "boîte", H.prices.agrafe_100, "Agrafes / cavaliers de fixation", "part de la pièce (~8 / m²)");
+    add2("Agrafes / cavaliers de fixation", (heatFloor * 8) / 100, "boîte", H.prices.agrafe_100, "Agrafes / cavaliers de fixation", "part de la pièce (~8 / m²)");
     add2("Bande périphérique 5 mm", 2 * (room.length + room.width), "m", H.prices.bande_peripherique, "Bande périphérique 5 mm");
-    add2("Film polyane 150 µm", Math.ceil(waste(rs.floor, 10)), "m²", H.prices.film_polyane, "Film polyane 150 µm");
-    add2("Chape fluide (estimation pose+mat.)", Math.ceil(rs.floor), "m²", H.prices.chape_m2, "Chape fluide (estimation pose+mat.)");
+    add2("Film polyane 150 µm", Math.ceil(waste(heatFloor, 10)), "m²", H.prices.film_polyane, "Film polyane 150 µm");
+    add2("Chape fluide (estimation pose+mat.)", Math.ceil(heatFloor), "m²", H.prices.chape_m2, "Chape fluide (estimation pose+mat.)");
     // Le chiffrage global plafonne à 4 thermostats par collecteur (une zone = plusieurs pièces) : on répartit ce total.
     const heatedAll = project.floors.flatMap((fl) => fl.rooms).filter((r2) => r2.floorHeating);
-    const tubeAll = heatedAll.reduce((sum, r2) => sum + waste((r2.length * r2.width) / pasM2, H.wastePct), 0);
+    const tubeAll = heatedAll.reduce((sum, r2) => sum + waste(heatArea(r2) / pasM2, H.wastePct), 0);
     const loopsAll = Math.max(1, Math.ceil(tubeAll / Math.max(1, H.maxLoopM)));
     const collAll = Math.max(1, Math.ceil(loopsAll / 10));
     const thermoAll = Math.min(heatedAll.length, Math.max(1, collAll * 4));
     add2(S.elec.connected ? "Thermostat d'ambiance connecté" : "Thermostat d'ambiance", thermoAll / Math.max(1, heatedAll.length), "u", S.elec.connected ? H.prices.thermostat_connecte : H.prices.thermostat, S.elec.connected ? "Thermostat d'ambiance connecté" : "Thermostat d'ambiance", `part de la pièce : ${thermoAll} thermostat(s) pour ${heatedAll.length} pièce(s) chauffée(s) (1 zone = jusqu'à 4 pièces par collecteur)`);
-    const si = isolants.find((i) => i.id === S.isolation.isolantSolId) ?? isolants[0];
+    const si = isolants.find((i) => i.id === (room.floorInsulId || S.isolation.isolantSolId)) ?? isolants[0];
     const spm2 = Math.max(0.1, si.panelL * si.panelW);
     out.push({ post: "isolation", name: si.name, qty: Math.round((waste(rs.floor, S.isolation.wastePct) / spm2) * 100) / 100, unit: "panneau", unitPrice: si.priceM2 * spm2, ref: si.name, mat: { post: "isolants", productId: si.id }, note: "sous plancher chauffant — part de la pièce" });
   }

@@ -62,7 +62,8 @@ export function roomEdges(room: Room, scale: number): WallEdgeInfo[] {
       ...e,
       exterior: exteriorSet.has(e.index),
       placoType: type,
-      passage: type === "none" || !room.placoWalls,
+      // pas de plaque ni d'isolant : paroi sans placo, ouverte, ou mur brut (brique nue)
+      passage: type === "none" || !room.placoWalls || room.wallStruct?.[String(e.index)] === "nu",
     };
   });
 }

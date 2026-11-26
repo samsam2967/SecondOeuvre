@@ -294,8 +294,7 @@ export function RecapPieces() {
 
       {all.length > 0 && (
         <>
-          <Card className="mt-4">
-            <h2 className="font-display mb-1 text-lg font-bold">Éléments communs — non rattachés à une pièce</h2>
+          <Fold title="Éléments communs — non rattachés à une pièce" summary={fmtE(communTotal)}>
             <p className="mb-3 text-xs leading-relaxed text-stone-500">
               Ces matériaux sont comptés une seule fois pour tout le chantier : ils ne se posent pas dans une pièce en particulier (ou dépendent de
               l'ensemble). Ils ne figurent donc dans aucune fiche de pièce ci-dessus.
@@ -361,7 +360,7 @@ export function RecapPieces() {
                 </tbody>
               </TableWrap>
             )}
-          </Card>
+          </Fold>
 
           <Card className="mt-4">
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -390,9 +389,8 @@ export function RecapPieces() {
             </p>
           </Card>
 
-          <Card className="mt-4">
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <h2 className="font-display text-lg font-bold">Rapprochement ligne par ligne avec le chiffrage global</h2>
+          <Fold title="Rapprochement ligne par ligne avec le chiffrage global" summary={`${tableRows.length} ligne${tableRows.length > 1 ? "s" : ""}`}>
+            <div className="mb-2 flex flex-wrap items-center justify-end gap-2">
               <label className="flex items-center gap-2 text-xs text-stone-600">
                 <input type="checkbox" checked={showAllLines} onChange={(e) => setShowAllLines(e.target.checked)} />
                 Afficher aussi les lignes entièrement comptées dans les pièces
@@ -439,10 +437,9 @@ export function RecapPieces() {
                 })}
               </tbody>
             </TableWrap>
-          </Card>
+          </Fold>
 
-          <Card className="mt-4">
-            <h2 className="font-display mb-2 text-lg font-bold">Totaux par poste</h2>
+          <Fold title="Totaux par poste" summary={fmtE(rec.totalGlobal)}>
             <TableWrap>
               <thead>
                 <tr>
@@ -484,7 +481,7 @@ export function RecapPieces() {
                 </tr>
               </tbody>
             </TableWrap>
-          </Card>
+          </Fold>
         </>
       )}
     </div>
@@ -629,6 +626,22 @@ function AddMaterial({ extras, label, onChange }: { extras: RoomExtra[]; label: 
         La quantité est prise telle que saisie (aucune perte ajoutée). Le prix suit l'onglet Matériaux, et le matériau est
         compté dans le chiffrage global, le budget et les listes de courses.
       </p>
+    </details>
+  );
+}
+
+/** Bloc repliable : le titre et un résumé restent visibles, le détail se déroule à la demande. */
+function Fold({ title, summary, children }: { title: string; summary?: string; children: React.ReactNode }) {
+  return (
+    <details className="group mt-4 rounded-2xl border border-rule bg-white/70">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-5 py-3">
+        <span className="font-display text-lg font-bold">{title}</span>
+        <span className="flex items-center gap-3 font-mono text-xs text-stone-500">
+          {summary}
+          <span className="transition-transform group-open:rotate-180">▼</span>
+        </span>
+      </summary>
+      <div className="border-t border-rule px-5 py-4">{children}</div>
     </details>
   );
 }

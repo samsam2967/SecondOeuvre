@@ -48,6 +48,8 @@ import { Btn } from "./components/ui";
 import { RecapPieces } from "./components/RecapPieces";
 import { ElecPlan } from "./components/ElecPlan";
 import { ElecGuide } from "./components/ElecGuide";
+import { VmcGuide } from "./components/VmcGuide";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Calepinage } from "./components/Calepinage";
 import { VmcPlan } from "./components/VmcPlan";
 import { InvoiceStamp } from "./components/InvoiceStamp";
@@ -86,6 +88,7 @@ const NAV: { id: PageId; label: string; icon: typeof House; group: string }[] = 
   { id: "conducteur", label: "Conducteur", icon: ClipboardList, group: "Pilotage" },
   { id: "tutoriels", label: "Tutoriels", icon: BookOpen, group: "Pilotage" },
   { id: "guideelec", label: "Guide électricité", icon: GraduationCap, group: "Pilotage" },
+  { id: "guidevmc", label: "Guide VMC", icon: GraduationCap, group: "Pilotage" },
   { id: "normes", label: "Normes", icon: Scale, group: "Pilotage" },
   { id: "materiaux", label: "Matériaux", icon: Boxes, group: "Pilotage" },
   { id: "notes", label: "Notes & liste", icon: StickyNote, group: "Pilotage" },
@@ -247,7 +250,7 @@ function cloudLabel(c: CloudInfo): string {
 }
 
 function Shell() {
-  const { page, setPage, project, cloud, logout } = useStore();
+  const { page, setPage, project, cloud, logout, undo } = useStore();
   const [open, setOpen] = useState(true);
   const [drawer, setDrawer] = useState(false);
 
@@ -359,7 +362,9 @@ function Shell() {
       </aside>
 
       <main className="min-w-0 flex-1 px-4 pb-8 pt-[68px] md:px-6 lg:p-8">
-        <Page />
+        <ErrorBoundary resetKey={page} onUndo={undo} onHome={() => setPage("dashboard")}>
+          <Page />
+        </ErrorBoundary>
       </main>
     </div>
   );
@@ -394,6 +399,8 @@ function Page() {
       return <VmcPlan />;
     case "signature":
       return <InvoiceStamp />;
+    case "guidevmc":
+      return <VmcGuide />;
     case "guideelec":
       return <ElecGuide />;
     case "budget":

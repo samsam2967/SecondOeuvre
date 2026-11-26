@@ -103,3 +103,47 @@ export function glossaryFor(text: string): GlossaryEntry[] {
     });
   });
 }
+
+/** Palette : chaque terme du glossaire garde la même couleur dans le texte, le glossaire et le PDF. */
+export const GLOSS_COLORS = ["#c2410c", "#2563eb", "#16a34a", "#9333ea", "#db2777", "#0d9488", "#a16207", "#4f46e5"];
+export const GLOSS_RGB: [number, number, number][] = GLOSS_COLORS.map((h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]);
+export const glossIndex = (g: GlossaryEntry) => Math.max(0, GLOSSARY.indexOf(g)) % GLOSS_COLORS.length;
+
+export interface TextPart {
+  text: string;
+  entry?: GlossaryEntry;
+}
+
+/** Découpe un texte en morceaux, les mots du glossaire étant repérés (pour les colorer). */
+export function splitGlossary(text: string): TextPart[] {
+  const nt = norm(text);
+  if (nt.length !== text.length) return [{ text }];
+  const keys = glossaryFor(text)
+    .flatMap((e) => [e.term, ...(e.alias ?? [])].map((k) => ({ k: norm(k).trim(), e })))
+    .filter((x) => x.k.length >= 3 && !x.k.includes("="))
+    .sort((a, b) => b.k.length - a.k.length);
+  const taken: { a: number; b: number; e: GlossaryEntry }[] = [];
+  for (const { k, e } of keys) {
+    let i = nt.indexOf(k);
+    while (i >= 0) {
+      const j = i + k.length;
+      const okL = !/[a-z0-9]/.test(nt[i - 1] ?? " ");
+      const okR = !/[a-z0-9]/.test(nt[j] ?? " ") || k.length > 5;
+      if (okL && okR && !taken.some((t) => i < t.b && j > t.a)) taken.push({ a: i, b: j, e });
+      i = nt.indexOf(k, i + 1);
+    }
+  }
+  taken.sort((x, y) => x.a - y.a);
+  const parts: TextPart[] = [];
+  let pos = 0;
+  for (const t of taken) {
+    if (t.a > pos) parts.push({ text: text.slice(pos, t.a) });
+    parts.push({ text: text.slice(t.a, t.b), entry: t.e });
+    pos = t.b;
+  }
+  if (pos < text.length) parts.push({ text: text.slice(pos) });
+  return parts.length ? parts : [{ text }];
+}
+
+/** Même découpage, sous forme de balisage lisible par le générateur de PDF. */
+export const markGlossary = (text: string) => splitGlossary(text).map((p) => (p.entry ? `⟦${glossIndex(p.entry)}|${p.text}⟧` : p.text)).join("");

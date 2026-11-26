@@ -1,10 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { ImagePlus, Pentagon, Ruler, Square, ScanSearch, MousePointer2, Plus, Minus, Maximize } from "lucide-react";
-import type { Floor, Pt } from "../types";
+import { ImagePlus, Pentagon, Ruler, Square, ScanSearch, MousePointer2, Plus, Minus, Maximize, Undo2, CirclePlus, CircleMinus, Hand } from "lucide-react";
+import { useStore } from "../store";
+import { ISOLANTS } from "../data/catalogs";
+import { sharedWalls, wallInsulated } from "../utils/adjacency";
+import { PLACO_T, wallGeometry } from "../utils/wallLayers";
+import { isolantColor } from "../utils/scene3d";
+import type { Floor, Pt, Stair } from "../types";
+import { stairBoxes, stairBoxPoly, stairToPlan } from "../utils/stairs";
 import { fmtD } from "../utils/format";
 import {
   closestEdge,
   dist,
+  edgeAxis,
+  snapVertex,
+  vertexAngle,
   insertOnEdge,
   pointsForRoom,
   polyPath,
@@ -16,16 +25,36 @@ import {
 } from "../utils/geometry";
 import { centroid } from "../utils/geometry";
 import { roomEdges } from "../utils/surfaces";
+import { OPENING_COLOR, openingSpan, placeOpenings, snapToEdge } from "../utils/openings";
 
-export type PlanTool = "select" | "poly" | "rect" | "scale";
+function pointInPoly(p: Pt, poly: Pt[]) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+export type PlanTool = "hand" | "select" | "poly" | "rect" | "scale" | "addpt" | "delpt";
 
 export function PlanCanvas({
   floor,
-  tool,
+  tool: toolProp,
   setTool,
   sel,
   setSel,
   hoveredEdge,
+  selOpening,
+  setSelOpening,
+  onMoveOpening,
+  selStair,
+  setSelStair,
+  onMoveStair,
+  onSettle,
+  onInsertPoint,
+  onRemovePoint,
   onCreate,
   onPatch,
   onScale,
@@ -41,6 +70,20 @@ export function PlanCanvas({
   sel: { kind: "room" | "part"; id: string } | null;
   setSel: (s: { kind: "room" | "part"; id: string } | null) => void;
   hoveredEdge?: number | null;
+  /** Ouverture (porte, fenêtre, passage…) sélectionnée, déplaçable le long des parois de la pièce sélectionnée. */
+  selOpening?: string | null;
+  setSelOpening?: (id: string | null) => void;
+  onMoveOpening?: (roomId: string, openingId: string, edge: number, t: number) => void;
+  /** Escalier sélectionné (déplaçable à la souris, réglé dans le panneau « Escaliers »). */
+  selStair?: string | null;
+  setSelStair?: (id: string | null) => void;
+  onMoveStair?: (id: string, dxPx: number, dyPx: number) => void;
+  /** Appelé après chaque modification de pièce : alignement des coins et détection des cloisons communes. */
+  onSettle?: () => void;
+  /** Ajout d'un point sur une paroi en conservant les ouvertures et réglages des parois. */
+  onInsertPoint?: (roomId: string, edge: number, pt: Pt) => void;
+  /** Suppression d'un point en renumérotant les parois. */
+  onRemovePoint?: (roomId: string, index: number) => void;
   onCreate: (pts: Pt[]) => void;
   onPatch: (id: string, pts: Pt[]) => void;
   onScale: (px: number, meters: number) => void;
@@ -56,8 +99,45 @@ export function PlanCanvas({
   const [rect, setRect] = useState<{ a: Pt; b: Pt } | null>(null);
   const [scalePts, setScalePts] = useState<Pt[]>([]);
   const [scaleVal, setScaleVal] = useState("4.50");
-  const [moving, setMoving] = useState<{ id: string; last: Pt } | null>(null);
+  const [moving, setMoving] = useState<{ id: string; last: Pt; start: Pt; pts0: Pt[] } | null>(null);
   const [dragV, setDragV] = useState<{ id: string; i: number } | null>(null);
+  const [dragO, setDragO] = useState<{ roomId: string; id: string } | null>(null);
+  const [dragS, setDragS] = useState<{ id: string; last: Pt } | null>(null);
+  const { undo, canUndo, project, patchSettings } = useStore();
+  // Barre d'espace maintenue : on déplace le plan (comme l'outil « main »), quel que soit l'outil choisi
+  const [spaceDown, setSpaceDown] = useState(false);
+  const tool: PlanTool = spaceDown ? "hand" : toolProp;
+  useEffect(() => {
+    const typing = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable);
+    };
+    const down = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || typing(e.target)) return;
+      e.preventDefault();
+      setSpaceDown(true);
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === "Space") setSpaceDown(false);
+    };
+    const blur = () => setSpaceDown(false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+  const [aimant, setAimant] = useState(true);
+  const [snapRoomsOn, setSnapRoomsOn] = useState(true);
+  const [showLen, setShowLen] = useState(false);
+  const [snapMark, setSnapMark] = useState<{ p: Pt; kind: "vertex" | "edge" | "axis" } | null>(null);
+  const [cursor, setCursor] = useState<Pt | null>(null);
+  const [clickRemove, setClickRemove] = useState(true);
+  const vDown = useRef<null | { id: string; i: number; x: number; y: number; moved: boolean }>(null);
+  const [hint, setHint] = useState("");
   const [edgeEdit, setEdgeEdit] = useState<{ id: string; edge: number; value: string } | null>(null);
   const vw = floor.planWidth || 1000;
   const vh = floor.planHeight || 700;
@@ -87,6 +167,8 @@ export function PlanCanvas({
     };
     setMoving(null);
     setDragV(null);
+    setDragO(null);
+    setDragS(null);
     setRect(null);
     panRef.current = null;
   };
@@ -102,9 +184,21 @@ export function PlanCanvas({
   };
 
   const releasePointer = (e: React.PointerEvent) => {
+    const vd = vDown.current;
+    vDown.current = null;
+    if (vd && !vd.moved && (clickRemove || tool === "delpt")) {
+      const r = floor.rooms.find((x) => x.id === vd.id);
+      if (r) {
+        const pts0 = pointsForRoom(r, scale);
+        if (pts0.length <= 3) setHint("Une pièce doit garder au moins 3 points.");
+        else if (onRemovePoint) onRemovePoint(vd.id, vd.i);
+        else onPatch(vd.id, removeVertex(pts0, vd.i));
+      }
+    }
     pointersRef.current.delete(e.pointerId);
     if (pointersRef.current.size < 2) pinchRef.current = null;
     if (pointersRef.current.size === 0) {
+      if (moving || dragV || rect) window.setTimeout(() => onSettle?.(), 80);
       if (rect) {
         const x = Math.min(rect.a.x, rect.b.x);
         const y = Math.min(rect.a.y, rect.b.y);
@@ -115,6 +209,9 @@ export function PlanCanvas({
       }
       setMoving(null);
       setDragV(null);
+      setDragO(null);
+      setDragS(null);
+      setSnapMark(null);
       panRef.current = null;
     }
   };
@@ -132,6 +229,156 @@ export function PlanCanvas({
   useEffect(() => {
     setCam({ x: 0, y: 0, w: vw, h: vh });
   }, [vw, vh, floor.planImage]);
+
+  // ---- Aimant sur les pièces voisines : plus de vide ni de recouvrement entre deux pièces ----
+  const projectOnSeg = (p: Pt, a: Pt, b: Pt): Pt => {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    if (l2 < 1e-9) return a;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2));
+    return { x: a.x + dx * t, y: a.y + dy * t };
+  };
+  const otherPolys = (skip?: string) => floor.rooms.filter((r) => r.id !== skip).map((r) => pointsForRoom(r, scale));
+  /** Colle un point sur un sommet, puis sur une paroi, puis sur l'alignement (x ou y) des pièces voisines. */
+  const snapRooms = (p: Pt, skip?: string, extra: Pt[] = []): { p: Pt; kind: "vertex" | "edge" | "axis" | null } => {
+    if (!snapRoomsOn) return { p, kind: null };
+    const tol = unitsPerPx() * 11;
+    const polys = otherPolys(skip);
+    let best: { p: Pt; d: number } | null = null;
+    for (const pts of polys) for (const v of pts) {
+      const d = dist(p, v);
+      if (d < tol && (!best || d < best.d)) best = { p: v, d };
+    }
+    for (const v of extra) {
+      const d = dist(p, v);
+      if (d < tol && (!best || d < best.d)) best = { p: v, d };
+    }
+    if (best) return { p: best.p, kind: "vertex" };
+    for (const pts of polys) for (let i = 0; i < pts.length; i++) {
+      const q = projectOnSeg(p, pts[i], pts[(i + 1) % pts.length]);
+      const d = dist(p, q);
+      if (d < tol && (!best || d < best.d)) best = { p: q, d };
+    }
+    if (best) return { p: best.p, kind: "edge" };
+    const q = { ...p };
+    let hit = false;
+    for (const v of [...polys.flat(), ...extra]) {
+      if (Math.abs(p.x - v.x) < tol * 0.7) { q.x = v.x; hit = true; }
+      if (Math.abs(p.y - v.y) < tol * 0.7) { q.y = v.y; hit = true; }
+    }
+    return hit ? { p: q, kind: "axis" } : { p, kind: null };
+  };
+  /** Décalage à appliquer à une pièce que l'on déplace pour qu'elle vienne se coller à ses voisines. */
+  const snapMoveOffset = (pts: Pt[], skip: string): { dx: number; dy: number } | null => {
+    if (!snapRoomsOn) return null;
+    const tol = unitsPerPx() * 11;
+    const polys = otherPolys(skip);
+    let best: { dx: number; dy: number; d: number } | null = null;
+    const consider = (from: Pt, to: Pt) => {
+      const d = dist(from, to);
+      if (d < tol && (!best || d < best.d)) best = { dx: to.x - from.x, dy: to.y - from.y, d };
+    };
+    for (const v of pts) for (const op of polys) for (const w of op) consider(v, w); // sommet sur sommet
+    if (best) return best;
+    for (const v of pts) for (const op of polys) for (let i = 0; i < op.length; i++) consider(v, projectOnSeg(v, op[i], op[(i + 1) % op.length])); // sommet sur paroi voisine
+    for (const op of polys) for (const w of op) for (let i = 0; i < pts.length; i++) consider(projectOnSeg(w, pts[i], pts[(i + 1) % pts.length]), w); // sommet voisin sur ma paroi
+    return best;
+  };
+
+  // ---- Couches des murs, toujours visibles : brique, isolant des murs extérieurs, cloisons et leur isolant ----
+  const isoList = project.settings.isolants?.length ? project.settings.isolants : ISOLANTS;
+  const murIso = isoList.find((i) => i.id === project.settings.isolation.isolantMurId) ?? isoList[0];
+  const cloIso = isoList.find((i) => i.id === project.settings.isolation.isolantCloisonId) ?? isoList[0];
+  const briqueMm = project.settings.briqueMm ?? 200;
+  const C_BRIQUE = "#b4553a";
+  const C_MUR_ISO = isolantColor(murIso?.name ?? "", !!murIso?.bio);
+  let C_CLO_ISO = isolantColor(cloIso?.name ?? "", !!cloIso?.bio);
+  if (C_CLO_ISO === C_MUR_ISO) C_CLO_ISO = "#5fa8d3";
+  const C_PLACO = "#e9e6df";
+  const strip = (a: Pt, b: Pt, nx: number, ny: number, d0: number, d1: number) =>
+    `M${a.x + nx * d0} ${a.y + ny * d0} L${b.x + nx * d0} ${b.y + ny * d0} L${b.x + nx * d1} ${b.y + ny * d1} L${a.x + nx * d1} ${a.y + ny * d1} Z`;
+  const wallLayers = () => {
+    const out: React.ReactNode[] = [];
+    const tPlaco = 0.013 * scale;
+    const tIso = ((murIso?.thickness ?? 100) / 1000) * scale;
+    const tBrique = (briqueMm / 1000) * scale;
+    const tCloIso = ((cloIso?.thickness ?? 70) / 1000) * scale;
+    // murs extérieurs : de l'intérieur vers l'extérieur = placo, isolant, brique (ou plaque si mur sans brique)
+    // les couches de deux murs voisins se rejoignent en biseau (onglet) à chaque coin
+    for (const r of floor.rooms) {
+      const g = wallGeometry(r, scale);
+      const { pts, info, U, corner } = g;
+      const n = pts.length;
+      if (n < 3) continue;
+      const band = (i: number, d0: number, d1: number) => {
+        const s0 = corner(i, false, d0);
+        const e0 = corner(i, true, d0);
+        const e1 = corner(i, true, d1);
+        const s1 = corner(i, false, d1);
+        return `M${s0.x} ${s0.y} L${e0.x} ${e0.y} L${e1.x} ${e1.y} L${s1.x} ${s1.y} Z`;
+      };
+      pts.forEach((a, i) => {
+        const e = info[i];
+        const b = pts[(i + 1) % n];
+        if (!e || U[i].len < 1e-6) return;
+        if (e.exterior) {
+          const openWall = r.wallTypes?.[String(i)] === "none";
+          if (e.passage) {
+            // mur brut ou paroi sans placo : on dessine la brique seule (rien n'est compté pour l'isolant ni le placo)
+            if (!openWall) out.push(<path key={`bn${r.id}${i}`} d={band(i, 0, tBrique)} fill={C_BRIQUE} stroke="#7c2d12" strokeWidth={0.8} vectorEffect="non-scaling-stroke" />);
+          } else {
+            const d = tPlaco;
+            out.push(<path key={`p${r.id}${i}`} d={band(i, 0, tPlaco)} fill={C_PLACO} stroke="#9ca3af" strokeWidth={0.6} vectorEffect="non-scaling-stroke" />);
+            out.push(<path key={`i${r.id}${i}`} d={band(i, d, d + tIso)} fill={C_MUR_ISO} stroke="#6b7280" strokeWidth={0.6} vectorEffect="non-scaling-stroke" />);
+            if (r.wallStruct?.[String(i)] === "ossature") {
+              out.push(<path key={`o${r.id}${i}`} d={band(i, d + tIso, d + tIso + tPlaco)} fill={C_PLACO} stroke="#9ca3af" strokeWidth={0.6} vectorEffect="non-scaling-stroke" />);
+            } else {
+              out.push(<path key={`b${r.id}${i}`} d={band(i, d + tIso, d + tIso + tBrique)} fill={C_BRIQUE} stroke="#7c2d12" strokeWidth={0.8} vectorEffect="non-scaling-stroke" />);
+            }
+            if (showLen) {
+              // longueurs comptées : placo = face intérieure ; isolant = milieu de son épaisseur (plus long aux angles saillants)
+              const dOut = d + tIso + (r.wallStruct?.[String(i)] === "ossature" ? tPlaco : tBrique) + 0.12 * scale;
+              const c0 = corner(i, false, dOut);
+              const c1 = corner(i, true, dOut);
+              const faceM = e.lengthM;
+              const isoM = g.lenM(i, PLACO_T + (murIso?.thickness ?? 100) / 2000);
+              const fs = Math.max(9, cam.w / 120);
+              out.push(
+                <text key={`len${r.id}${i}`} x={(c0.x + c1.x) / 2} y={(c0.y + c1.y) / 2} textAnchor="middle" fontSize={fs} fontFamily="IBM Plex Mono" fontWeight={700} fill="#1f2937" stroke="#fff" strokeWidth={fs / 4} paintOrder="stroke">
+                  {`placo ${faceM.toFixed(2).replace(".", ",")} · isolant ${isoM.toFixed(2).replace(".", ",")} m`}
+                </text>,
+              );
+            }
+          }
+        }
+        if (e.passage && e.exterior && r.wallStruct?.[String(i)] !== "nu") {
+          out.push(<line key={`np${r.id}${i}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#dc2626" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />);
+        }
+      });
+    }
+    // cloisons entre deux pièces : placo, isolant de cloison (ou ossature vide), placo — centrées sur la limite commune
+    for (const w of sharedWalls(floor)) {
+      const A = floor.rooms.find((x) => x.id === w.roomAId);
+      if (!A) continue;
+      const len = Math.hypot(w.p1.x - w.p0.x, w.p1.y - w.p0.y);
+      if (len < 1e-6) continue;
+      const nx = (w.p1.y - w.p0.y) / len;
+      const ny = -(w.p1.x - w.p0.x) / len;
+      if (w.passage) {
+        out.push(<line key={`pas${w.roomAId}${w.edgeA}${w.roomBId}${w.edgeB}`} x1={w.p0.x} y1={w.p0.y} x2={w.p1.x} y2={w.p1.y} stroke="#dc2626" strokeWidth={2.5} strokeDasharray="2 5" vectorEffect="non-scaling-stroke" />);
+        continue;
+      }
+      const ins = wallInsulated(floor, w);
+      const core = ins ? tCloIso : (70 / 1000) * scale;
+      const T = core + 2 * tPlaco;
+      const k = `c${w.roomAId}${w.edgeA}${w.roomBId}${w.edgeB}`;
+      out.push(<path key={`${k}a`} d={strip(w.p0, w.p1, nx, ny, -T / 2, -T / 2 + tPlaco)} fill={C_PLACO} stroke="#9ca3af" strokeWidth={0.6} vectorEffect="non-scaling-stroke" />);
+      out.push(<path key={`${k}c`} d={strip(w.p0, w.p1, nx, ny, -T / 2 + tPlaco, T / 2 - tPlaco)} fill={ins ? C_CLO_ISO : "#ffffff"} stroke={ins ? "#475569" : "#9ca3af"} strokeDasharray={ins ? undefined : "3 2"} strokeWidth={0.7} vectorEffect="non-scaling-stroke" />);
+      out.push(<path key={`${k}b`} d={strip(w.p0, w.p1, nx, ny, T / 2 - tPlaco, T / 2)} fill={C_PLACO} stroke="#9ca3af" strokeWidth={0.6} vectorEffect="non-scaling-stroke" />);
+    }
+    return out;
+  };
 
   const pt = (e: { clientX: number; clientY: number }) => {
     const svg = ref.current;
@@ -187,6 +434,9 @@ export function PlanCanvas({
       }}
     >
       <div className="absolute left-3 top-3 z-10 flex flex-col gap-1 rounded-2xl border border-rule bg-white/95 p-1.5 shadow-lg">
+        <IconBtn active={toolProp === "hand" || spaceDown} onClick={() => setTool("hand")} title="Main : déplacer le plan (ou maintiens la barre d'espace)">
+          <Hand size={16} />
+        </IconBtn>
         <IconBtn active={tool === "select"} onClick={() => setTool("select")} title="Sélection">
           <MousePointer2 size={16} />
         </IconBtn>
@@ -198,6 +448,15 @@ export function PlanCanvas({
         </IconBtn>
         <IconBtn active={tool === "scale"} onClick={() => setTool("scale")} title="Cote / échelle">
           <Ruler size={16} />
+        </IconBtn>
+        <IconBtn active={tool === "addpt"} onClick={() => setTool(tool === "addpt" ? "select" : "addpt")} title="Ajouter un point : clique sur une paroi (ou clic droit)">
+          <CirclePlus size={16} />
+        </IconBtn>
+        <IconBtn active={tool === "delpt"} onClick={() => setTool(tool === "delpt" ? "select" : "delpt")} title="Supprimer un point : clique sur le point">
+          <CircleMinus size={16} />
+        </IconBtn>
+        <IconBtn active={false} onClick={() => { if (canUndo) undo(); }} title="Retour : annule la dernière modification (Ctrl+Z)">
+          <Undo2 size={16} className={canUndo ? "" : "opacity-30"} />
         </IconBtn>
         <div className="my-1 h-px bg-rule" />
         <label className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl text-stone-600 hover:bg-paper-2" title="Importer un plan">
@@ -220,6 +479,39 @@ export function PlanCanvas({
             <ScanSearch size={16} />
           </IconBtn>
         )}
+      </div>
+
+      <div className="absolute bottom-3 left-3 z-10 max-w-[80%] space-y-1 rounded-xl border border-rule bg-white/95 px-3 py-2 text-[11px] text-stone-600 shadow">
+        <label className="flex items-center gap-1.5 font-semibold"><input type="checkbox" checked={aimant} onChange={(e) => setAimant(e.target.checked)} /> Aimant murs droits et angles droits</label>
+        <label className="flex items-center gap-1.5 font-semibold"><input type="checkbox" checked={snapRoomsOn} onChange={(e) => setSnapRoomsOn(e.target.checked)} /> Coller aux pièces voisines (sans vide)</label>
+        <label className="flex items-center gap-1.5"><input type="checkbox" checked={clickRemove} onChange={(e) => setClickRemove(e.target.checked)} /> Clic gauche sur un point = le supprimer</label>
+        <div className="text-stone-400">Clic droit sur une paroi = ajouter un point · Ctrl+Z = retour</div>
+        {hint && <div className="font-semibold text-amber-700">{hint}</div>}
+      </div>
+
+      <div className="absolute bottom-3 right-3 z-10 max-w-[44%] space-y-1 rounded-xl border border-rule bg-white/95 px-3 py-2 text-[11px] text-stone-700 shadow">
+        <div className="mb-0.5 font-semibold">Murs : ce qui est compté</div>
+        {[
+          [C_BRIQUE, `Brique / mur porteur`],
+          [C_MUR_ISO, `Isolant murs extérieurs — ${murIso?.name} ${murIso?.thickness} mm`],
+          [C_CLO_ISO, `Isolant des cloisons — ${cloIso?.name} ${cloIso?.thickness} mm`],
+          [C_PLACO, "Plaque de plâtre (aussi côté extérieur d'un mur sans brique)"],
+        ].map(([c, l]) => (
+          <div key={l} className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-4 shrink-0 rounded-sm border border-black/30" style={{ background: c }} />
+            {l}
+          </div>
+        ))}
+        <div className="flex items-center gap-1.5"><span className="inline-block h-0 w-4 shrink-0 border-t-2 border-dashed border-red-600" /> Sans placo / passage</div>
+        <div className="text-stone-500">Brique seule = mur brut (ni isolant, ni placo)</div>
+        <label className="flex items-center gap-1.5 pt-0.5 font-semibold">
+          <input type="checkbox" checked={showLen} onChange={(e) => setShowLen(e.target.checked)} /> Afficher les longueurs comptées
+        </label>
+        <label className="flex items-center gap-1.5 pt-0.5">
+          Épaisseur brique
+          <input type="number" min={50} max={500} step={10} className="w-14 rounded border border-rule px-1 py-0.5" value={Math.round(briqueMm / 10)} onChange={(e) => patchSettings("briqueMm", Math.max(5, Number(e.target.value)) * 10)} />
+          cm
+        </label>
       </div>
 
       <div className="absolute right-3 top-3 z-10 flex items-center gap-2 rounded-full border border-rule bg-white/95 px-3 py-1.5 text-[11px] font-medium text-stone-500 shadow">
@@ -254,7 +546,7 @@ export function PlanCanvas({
       <svg
         ref={ref}
         viewBox={`${cam.x} ${cam.y} ${cam.w} ${cam.h}`}
-        className="h-[420px] w-full cursor-crosshair touch-none select-none sm:h-[540px] lg:h-[620px]"
+        className={`h-[420px] w-full touch-none select-none sm:h-[540px] lg:h-[620px] ${tool === "hand" ? (panRef.current ? "cursor-grabbing" : "cursor-grab") : "cursor-crosshair"}`}
         preserveAspectRatio="xMidYMid meet"
         onWheel={(e) => {
           e.preventDefault();
@@ -269,7 +561,7 @@ export function PlanCanvas({
         onPointerDown={(e) => {
           track(e);
           if (pinchRef.current) return;
-          if (e.button === 1 || e.altKey || e.shiftKey) {
+          if (e.button === 1 || e.altKey || e.shiftKey || tool === "hand") {
             panRef.current = { x: e.clientX, y: e.clientY };
             return;
           }
@@ -279,14 +571,60 @@ export function PlanCanvas({
             panRef.current = { x: e.clientX, y: e.clientY };
             return;
           }
+          if (tool === "delpt") {
+            // supprime le point le plus proche du clic (pièce sélectionnée en priorité), sans avoir à viser le rond exactement
+            const tol = unitsPerPx() * 18;
+            let best: { id: string; i: number; d: number } | null = null;
+            for (const r of floor.rooms) {
+              const pts0 = pointsForRoom(r, scale);
+              pts0.forEach((v, i) => {
+                const d = dist(p, v) - (r.id === sel?.id ? unitsPerPx() * 6 : 0);
+                if (dist(p, v) < tol && (!best || d < best.d)) best = { id: r.id, i, d };
+              });
+            }
+            if (!best) {
+              setHint("Clique sur un point à supprimer.");
+              return;
+            }
+            const b = best as { id: string; i: number; d: number };
+            const rr = floor.rooms.find((x) => x.id === b.id);
+            if (rr && pointsForRoom(rr, scale).length <= 3) setHint("Une pièce doit garder au moins 3 points.");
+            else if (onRemovePoint) onRemovePoint(b.id, b.i);
+            else if (rr) onPatch(b.id, removeVertex(pointsForRoom(rr, scale), b.i));
+            return;
+          }
+          if (tool === "addpt") {
+            const r = floor.rooms.find((x) => x.id === sel?.id) ?? floor.rooms.find((x) => pointInPoly(p, pointsForRoom(x, scale)));
+            if (!r) {
+              setHint("Sélectionne d'abord une pièce, puis clique sur une de ses parois.");
+              return;
+            }
+            const pts0 = pointsForRoom(r, scale);
+            const ce = closestEdge(pts0, p);
+            if (ce.dist > unitsPerPx() * 24) {
+              setHint("Clique plus près d'une paroi de la pièce sélectionnée.");
+              return;
+            }
+            setSel({ kind: "room", id: r.id });
+            { if (onInsertPoint) onInsertPoint(r.id, ce.edge, ce.hit); else onPatch(r.id, insertOnEdge(pts0, ce.edge, ce.hit)); }
+            return;
+          }
           if (tool === "poly") {
             if (draft.length >= 3 && dist(p, draft[0]) < Math.max(10, cam.w / 80)) {
               onCreate(draft);
               setDraft([]);
-            } else setDraft([...draft, p]);
+              setSnapMark(null);
+              window.setTimeout(() => onSettle?.(), 80);
+            } else {
+              const sn = snapRooms(p, undefined, draft);
+              setDraft([...draft, sn.p]);
+            }
             return;
           }
-          if (tool === "rect") setRect({ a: p, b: p });
+          if (tool === "rect") {
+            const sn = snapRooms(p);
+            setRect({ a: sn.p, b: sn.p });
+          }
           if (tool === "scale") {
             const next = [...scalePts, p].slice(-2);
             setScalePts(next);
@@ -320,24 +658,75 @@ export function PlanCanvas({
             panRef.current = { x: e.clientX, y: e.clientY };
             return;
           }
-          if (rect) setRect({ ...rect, b: p });
+          if (tool === "poly" && draft.length > 0) {
+            const sn = snapRooms(p, undefined, draft);
+            setCursor(sn.p);
+            setSnapMark(sn.kind ? { p: sn.p, kind: sn.kind } : null);
+          }
+          if (rect) {
+            const sn = snapRooms(p);
+            setRect({ ...rect, b: sn.p });
+            setSnapMark(sn.kind ? { p: sn.p, kind: sn.kind } : null);
+          }
           if (moving) {
             const r = floor.rooms.find((x) => x.id === moving.id);
-            if (r) onPatch(moving.id, translate(pointsForRoom(r, scale), p.x - moving.last.x, p.y - moving.last.y));
-            setMoving({ ...moving, last: p });
+            if (r) {
+              const moved = translate(moving.pts0, p.x - moving.start.x, p.y - moving.start.y);
+              const off = snapMoveOffset(moved, moving.id);
+              onPatch(moving.id, off ? translate(moved, off.dx, off.dy) : moved);
+              setSnapMark(off ? { p: { x: moved[0].x + off.dx, y: moved[0].y + off.dy }, kind: "vertex" } : null);
+            }
           }
           if (dragV) {
             const r = floor.rooms.find((x) => x.id === dragV.id);
-            if (r) onPatch(dragV.id, setVertex(pointsForRoom(r, scale), dragV.i, p));
+            if (vDown.current && Math.hypot(e.clientX - vDown.current.x, e.clientY - vDown.current.y) > 4) vDown.current.moved = true;
+            if (r && (!vDown.current || vDown.current.moved)) {
+              const cur = pointsForRoom(r, scale);
+              const sn = snapRooms(p, dragV.id);
+              const q = sn.kind === "vertex" || sn.kind === "edge" ? sn.p : aimant ? snapVertex(cur, dragV.i, sn.p, unitsPerPx() * 7) : sn.p;
+              setSnapMark(sn.kind ? { p: sn.p, kind: sn.kind } : null);
+              onPatch(dragV.id, setVertex(cur, dragV.i, q));
+            }
+          }
+          if (dragS && onMoveStair) {
+            onMoveStair(dragS.id, p.x - dragS.last.x, p.y - dragS.last.y);
+            setDragS({ ...dragS, last: p });
+          }
+          if (dragO && onMoveOpening) {
+            const r = floor.rooms.find((x) => x.id === dragO.roomId);
+            const o = r?.openings.find((x) => x.id === dragO.id);
+            if (r && o) {
+              const hit = snapToEdge(r, scale, p, o.width / 2);
+              if (hit) onMoveOpening(r.id, o.id, hit.edge, Math.round(hit.t * 1000) / 1000);
+            }
           }
         }}
         onPointerUp={releasePointer}
         onPointerCancel={releasePointer}
+        onContextMenu={(e) => {
+          // Clic droit sur la paroi d'une pièce = ajouter un point à cet endroit
+          e.preventDefault();
+          const p = pt(e);
+          const r = floor.rooms.find((x) => x.id === sel?.id) ?? floor.rooms.find((x) => pointInPoly(p, pointsForRoom(x, scale)));
+          if (!r) {
+            setHint("Clic droit sur la paroi d'une pièce pour ajouter un point.");
+            return;
+          }
+          const pts0 = pointsForRoom(r, scale);
+          const ce = closestEdge(pts0, p);
+          if (ce.dist > unitsPerPx() * 30) {
+            setHint("Fais le clic droit plus près d'une paroi de la pièce.");
+            return;
+          }
+          setSel({ kind: "room", id: r.id });
+          { if (onInsertPoint) onInsertPoint(r.id, ce.edge, ce.hit); else onPatch(r.id, insertOnEdge(pts0, ce.edge, ce.hit)); }
+        }}
       >
         <rect x={cam.x} y={cam.y} width={cam.w} height={cam.h} fill="#fbfcfa" />
         {floor.planImage && (
           <image href={floor.planImage} width={vw} height={vh} opacity={opacity / 100} />
         )}
+        <g className="pointer-events-none">{wallLayers()}</g>
         {floor.rooms.map((r) => {
           const pts = pointsForRoom(r, scale);
           const active = sel?.id === r.id;
@@ -360,7 +749,7 @@ export function PlanCanvas({
                   track(e);
                   if (pinchRef.current) return;
                   setSel({ kind: "room", id: r.id });
-                  setMoving({ id: r.id, last: pt(e) });
+                  { const p0 = pt(e); setMoving({ id: r.id, last: p0, start: p0, pts0: pointsForRoom(r, scale) }); }
                 }}
                 onDoubleClick={(e) => {
                   if (tool !== "select") return;
@@ -485,6 +874,36 @@ export function PlanCanvas({
                   {fmtD(r.areaM2 || r.length * r.width, 1)} m²
                 </text>
               </g>
+              {/* Portes, fenêtres et ouvertures de la pièce sélectionnée : glisse-les le long des parois */}
+              {active &&
+                placeOpenings(r, scale).map((pl) => {
+                  const sp = openingSpan(r, scale, pl, pl.o.width);
+                  const col = pl.o.id === selOpening ? "#f97316" : OPENING_COLOR[pl.o.type];
+                  const mx = (sp.a.x + sp.b.x) / 2;
+                  const my = (sp.a.y + sp.b.y) / 2;
+                  const short = { porte: "P", fenetre: "F", baie: "B", porte_fenetre: "PF", porte_garage: "G", arche: "A", passage: "O", trappe: "T" }[pl.o.type];
+                  const grab = (e: React.PointerEvent) => {
+                    if (tool === "hand") return;
+                    e.stopPropagation();
+                    track(e);
+                    if (pinchRef.current) return;
+                    setSel({ kind: "room", id: r.id });
+                    setSelOpening?.(pl.o.id);
+                    setDragO({ roomId: r.id, id: pl.o.id });
+                  };
+                  return (
+                    <g key={`op-${pl.o.id}`}>
+                      <line x1={sp.a.x} y1={sp.a.y} x2={sp.b.x} y2={sp.b.y} stroke={col} strokeWidth={pl.o.type === "passage" ? 9 : 7} strokeLinecap="butt" strokeDasharray={pl.o.type === "passage" ? "4 3" : undefined} vectorEffect="non-scaling-stroke" opacity={0.95} />
+                      <line x1={sp.a.x} y1={sp.a.y} x2={sp.b.x} y2={sp.b.y} stroke="transparent" strokeWidth={22} vectorEffect="non-scaling-stroke" className="cursor-grab" onPointerDown={grab} />
+                      <g transform={`translate(${mx}, ${my})`} onPointerDown={grab} className="cursor-grab">
+                        <circle r={Math.max(8, cam.w / 100)} fill={col} stroke="#fff" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                        <text y={Math.max(8, cam.w / 100) * 0.35} textAnchor="middle" fontSize={Math.max(8, cam.w / 100) * 0.95} fontWeight={700} fontFamily="IBM Plex Mono" fill="#fff" className="pointer-events-none">
+                          {short}
+                        </text>
+                      </g>
+                    </g>
+                  );
+                })}
               {active &&
                 pts.map((p, i) => (
                   <circle
@@ -497,19 +916,93 @@ export function PlanCanvas({
                     strokeWidth={2}
                     className="cursor-nwse-resize"
                     onPointerDown={(e) => {
+                      if (tool === "hand") return;
                       e.stopPropagation();
                       track(e);
                       if (pinchRef.current) return;
                       setSel({ kind: "room", id: r.id });
+                      vDown.current = { id: r.id, i, x: e.clientX, y: e.clientY, moved: false };
                       setDragV({ id: r.id, i });
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      onPatch(r.id, removeVertex(pts, i));
                     }}
                   />
                 ))}
+              {/* Indicateurs : murs droits et angles droits (permanents sur la pièce sélectionnée, détaillés pendant le déplacement d'un point) */}
+              {active &&
+                pts.map((p, i) => {
+                  const dragging = dragV?.id === r.id;
+                  const a = vertexAngle(pts, i);
+                  const isRight = Math.abs(a - 90) < 0.6;
+                  const near = dragging && (dragV!.i === i || (dragV!.i + 1) % pts.length === i || (dragV!.i + pts.length - 1) % pts.length === i);
+                  if (!isRight && !(dragging && dragV!.i === i)) return null;
+                  const col = isRight ? "#16a34a" : "#ea580c";
+                  const sz = Math.max(9, cam.w / 90);
+                  return (
+                    <g key={`ang-${i}`} className="pointer-events-none">
+                      {isRight && near !== false && <circle cx={p.x} cy={p.y} r={sz * 1.5} fill="none" stroke={col} strokeWidth={2} vectorEffect="non-scaling-stroke" opacity={0.9} />}
+                      {dragging && dragV!.i === i && (
+                        <g>
+                          <rect x={p.x + sz * 1.2} y={p.y - sz * 2.6} width={sz * 7.2} height={sz * 1.8} rx={sz * 0.4} fill={col} />
+                          <text x={p.x + sz * 4.8} y={p.y - sz * 1.3} textAnchor="middle" fontSize={sz * 1.05} fontFamily="IBM Plex Mono" fontWeight={700} fill="#fff">
+                            {isRight ? "90° ✓ angle droit" : `${a.toFixed(1).replace(".", ",")}°`}
+                          </text>
+                        </g>
+                      )}
+                    </g>
+                  );
+                })}
+              {active &&
+                dragV?.id === r.id &&
+                pts.map((p, i) => {
+                  const q = pts[(i + 1) % pts.length];
+                  const touches = i === dragV.i || (i + 1) % pts.length === dragV.i;
+                  const ax = edgeAxis(p, q);
+                  if (!touches || !ax) return null;
+                  return (
+                    <g key={`ax-${i}`} className="pointer-events-none">
+                      <line x1={p.x} y1={p.y} x2={q.x} y2={q.y} stroke="#16a34a" strokeWidth={4} vectorEffect="non-scaling-stroke" opacity={0.8} />
+                      <text x={(p.x + q.x) / 2} y={(p.y + q.y) / 2 - Math.max(10, cam.w / 70)} textAnchor="middle" fontSize={Math.max(10, cam.w / 80)} fontFamily="IBM Plex Mono" fontWeight={700} fill="#16a34a">
+                        mur droit {ax === "h" ? "horizontal" : "vertical"} ✓
+                      </text>
+                    </g>
+                  );
+                })}
+            </g>
+          );
+        })}
+        {/* Escaliers : marches et paliers à l'échelle, déplaçables */}
+        {(floor.stairs ?? []).map((st: Stair) => {
+          const boxes = stairBoxes(st);
+          const on = selStair === st.id;
+          const start = stairToPlan(st, scale, 0, st.width / 2);
+          const end = stairToPlan(st, scale, Math.min(0.9, st.tread * 3), st.width / 2);
+          const lab = stairToPlan(st, scale, 0, 0);
+          const col = on ? "#f97316" : "#475569";
+          return (
+            <g
+              key={st.id}
+              className={tool === "select" ? "cursor-move" : ""}
+              onPointerDown={(e) => {
+                if (tool !== "select") return;
+                e.stopPropagation();
+                track(e);
+                if (pinchRef.current) return;
+                setSelStair?.(st.id);
+                setSel(null);
+                setDragS({ id: st.id, last: pt(e) });
+              }}
+            >
+              {boxes.map((b, i) => (
+                <path key={i} d={polyPath(stairBoxPoly(st, scale, b))} fill={b.landing ? "#fde68a" : "#e2e8f0"} fillOpacity={0.9} stroke={col} strokeWidth={on ? 2 : 1.2} vectorEffect="non-scaling-stroke" />
+              ))}
+              <line x1={start.x} y1={start.y} x2={end.x} y2={end.y} stroke="#0f172a" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+              <circle cx={start.x} cy={start.y} r={Math.max(3, cam.w / 260)} fill="#0f172a" />
+              <text x={lab.x} y={lab.y - Math.max(6, cam.w / 120)} fontSize={Math.max(10, cam.w / 80)} fontFamily="IBM Plex Mono" fontWeight={700} fill={col} className="pointer-events-none">
+                {st.name} ↑ {Math.round(st.rise * 100)} cm
+              </text>
             </g>
           );
         })}
@@ -522,6 +1015,16 @@ export function PlanCanvas({
             strokeWidth={1.5}
             vectorEffect="non-scaling-stroke"
           />
+        )}
+        {draft.length > 0 && cursor && tool === "poly" && (
+          <line x1={draft[draft.length - 1].x} y1={draft[draft.length - 1].y} x2={cursor.x} y2={cursor.y} stroke="#23271f" strokeDasharray="3 4" strokeWidth={1.2} vectorEffect="non-scaling-stroke" opacity={0.7} />
+        )}
+        {snapMark && (
+          <g className="pointer-events-none">
+            {snapMark.kind === "vertex" && <circle cx={snapMark.p.x} cy={snapMark.p.y} r={Math.max(7, cam.w / 120)} fill="none" stroke="#16a34a" strokeWidth={3} vectorEffect="non-scaling-stroke" />}
+            {snapMark.kind === "edge" && <rect x={snapMark.p.x - Math.max(5, cam.w / 160)} y={snapMark.p.y - Math.max(5, cam.w / 160)} width={Math.max(10, cam.w / 80)} height={Math.max(10, cam.w / 80)} fill="none" stroke="#16a34a" strokeWidth={3} vectorEffect="non-scaling-stroke" />}
+            {snapMark.kind === "axis" && <circle cx={snapMark.p.x} cy={snapMark.p.y} r={Math.max(4, cam.w / 200)} fill="#16a34a" opacity={0.7} />}
+          </g>
         )}
         {rect && (
           <rect
@@ -624,6 +1127,9 @@ export function PlanCanvas({
           </div>
           <div className="flex items-center gap-1.5">
             <span className="h-0 w-5 border-t-2 border-dashed border-amber-600" /> Passage (sans placo)
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-flex h-3.5 w-5 items-center justify-center rounded-full bg-[#2b6cb0] font-mono text-[8px] font-bold text-white">F</span> Fenêtre / porte / ouverture : glisse-la sur les parois
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-flex h-3.5 w-5 items-center justify-center rounded bg-ink font-mono text-[8px] font-bold text-white">P1</span>

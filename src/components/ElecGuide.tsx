@@ -5,19 +5,20 @@ import { ELEC_GUIDE, type Block, type Chapter } from "../data/elecGuide";
 import { useStore } from "../store";
 import { buildElecGuidePdf, svgToPng } from "../utils/pdfDocs";
 import { Btn, Card, H } from "./ui";
+import { SvgVmcDouble, SvgVmcReseau, SvgVmcSimple } from "./VmcSvgs";
 
 /** Met en gras les passages écrits **comme ceci**. */
-function rich(text: string) {
+export function rich(text: string) {
   return text.split(/\*\*(.+?)\*\*/g).map((part, i) => (i % 2 ? <strong key={i}>{part}</strong> : <span key={i}>{part}</span>));
 }
 
-const plain = (s: string) =>
+export const plain = (s: string) =>
   s
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
 
-function chapterText(ch: Chapter): string {
+export function chapterText(ch: Chapter): string {
   const parts: string[] = [ch.title, ch.intro ?? ""];
   for (const b of ch.blocks) {
     if (b.t === "p" || b.t === "tip" || b.t === "warn" || b.t === "info") parts.push(b.text);
@@ -140,7 +141,7 @@ export function ElecGuide() {
   );
 }
 
-function BlockView({ b }: { b: Block }) {
+export function BlockView({ b }: { b: Block }) {
   switch (b.t) {
     case "p":
       return <p className="text-sm leading-relaxed text-stone-700">{rich(b.text)}</p>;
@@ -203,6 +204,9 @@ function BlockView({ b }: { b: Block }) {
           {b.id === "guirlande" && <SvgGuirlande />}
           {b.id === "volumes" && <SvgVolumes />}
           {b.id === "eclairage" && <SvgEclairage />}
+          {b.id === "vmc-simple" && <SvgVmcSimple />}
+          {b.id === "vmc-double" && <SvgVmcDouble />}
+          {b.id === "vmc-reseau" && <SvgVmcReseau />}
           <figcaption className="mt-2 text-center text-xs text-stone-500">{b.caption}</figcaption>
         </figure>
       );

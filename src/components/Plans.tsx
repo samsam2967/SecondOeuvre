@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2, Wand2 } from "lucide-react";
 import { PLAQUE_INFO, ROOM_TYPES } from "../data/catalogs";
 import { useStore } from "../store";
@@ -7,10 +7,14 @@ import { analyzeFloorPlan } from "../utils/analyzePlan";
 import { fmtD } from "../utils/format";
 import { orthogonalize, pointsForRoom, setEdgeLength, syncFromPoints } from "../utils/geometry";
 import { uid } from "../utils/id";
-import { labelDetectedRooms, makeFloor, makeOpening, makeRoom, parseRoomText } from "../utils/rooms";
+import { labelDetectedRooms, makeFloor, makeRoom, parseRoomText } from "../utils/rooms";
 import { roomMaterials } from "../utils/calc";
 import { POSTS } from "../data/catalogs";
 import { roomEdges, roomSurfaces } from "../utils/surfaces";
+import { StairsPanel } from "./StairsPanel";
+import { PlacoAuditCard } from "./PlacoAuditCard";
+import { alignFloor, insertVertex, removeFlatVertices, removeVertexRemap, sharedWalls, wallInsulated, withAdjacencyFloor } from "../utils/adjacency";
+import { isWallOpening, OPENING_NAMES, OPENING_PRESET, OPENING_TYPES, placeOpenings, planEdges } from "../utils/openings";
 import { PlanCanvas, type PlanTool } from "./PlanCanvas";
 import { Btn, Card, Field, H, Input, Num, Select, TableWrap, Td, Th, Toggle } from "./ui";
 
@@ -21,6 +25,8 @@ export function Plans() {
   const floor = project.floors.find((f) => f.id === floorId) ?? project.floors[0];
   const [sel, setSel] = useState<{ kind: "room" | "part"; id: string } | null>(null);
   const [hoverEdge, setHoverEdge] = useState<number | null>(null);
+  const [selOpening, setSelOpening] = useState<string | null>(null);
+  const [selStair, setSelStair] = useState<string | null>(null);
   const [tool, setTool] = useState<PlanTool>("select");
   const [text, setText] = useState("Salon 6.2x4.8, Cuisine 4.2x3.4, Chambre 4x3.5, SDB 3.2x2.4");
   const [msg, setMsg] = useState("");
@@ -30,6 +36,45 @@ export function Plans() {
   useEffect(() => {
     if (!project.floors.some((f) => f.id === floorId) && project.floors[0]) setFloorId(project.floors[0].id);
   }, [project.floors, floorId]);
+
+  // Les ouvertures encore « automatiques » de la pièce sélectionnée sont fixées à leur position affichée :
+  // ce que tu vois sur le plan est exactement ce que montrent les vues 3D de tous les postes.
+  const selRoomId = sel?.kind === "room" ? sel.id : "";
+  useEffect(() => {
+    if (!selRoomId) return;
+    const f = project.floors.find((x) => x.id === floorId);
+    const r = f?.rooms.find((x) => x.id === selRoomId);
+    if (!f || !r) return;
+    const auto = placeOpenings(r, f.planScale || 40).filter((p) => p.auto);
+    if (!auto.length) return;
+    const byId = new Map(auto.map((p) => [p.o.id, p]));
+    updateRoom(f.id, r.id, { openings: r.openings.map((o) => (byId.has(o.id) ? { ...o, edge: byId.get(o.id)!.edge, t: byId.get(o.id)!.t } : o)) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selRoomId, floorId]);
+
+  // Alignement des coins et détection des cloisons : appelé après chaque modification du plan.
+  const floorRef = useRef(floor);
+  floorRef.current = floor;
+  const settle = () => {
+    const f = floorRef.current;
+    if (!f) return;
+    // on part toujours de l'état le plus récent du projet, et une erreur de données ne doit jamais bloquer la page
+    updateFloor(f.id, (cur) => {
+      try {
+        const next = withAdjacencyFloor(cur);
+        return next === cur ? cur : { ...cur, rooms: next.rooms };
+      } catch {
+        return cur;
+      }
+    });
+  };
+  const settled = useRef("");
+  useEffect(() => {
+    if (!floor || settled.current === floor.id) return;
+    settled.current = floor.id;
+    settle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [floorId]);
 
   if (!floor) {
     return (
@@ -178,6 +223,26 @@ export function Plans() {
               sel={sel}
               setSel={setSel}
               hoveredEdge={sel?.kind === "room" ? hoverEdge : null}
+              selOpening={selOpening}
+              setSelOpening={setSelOpening}
+              selStair={selStair}
+              setSelStair={setSelStair}
+              onSettle={settle}
+              onRemovePoint={(roomId, index) => {
+                const r = floor.rooms.find((x) => x.id === roomId);
+                if (r) updateRoom(floor.id, roomId, removeVertexRemap(r, index, scale));
+              }}
+              onInsertPoint={(roomId, edge, pt) => {
+                const r = floor.rooms.find((x) => x.id === roomId);
+                if (r) updateRoom(floor.id, roomId, insertVertex(r, edge, pt, scale));
+                window.setTimeout(settle, 80);
+              }}
+              onMoveStair={(id, dx, dy) => updateFloor(floor.id, (f) => ({ ...f, stairs: (f.stairs ?? []).map((st) => (st.id === id ? { ...st, x: st.x + dx, y: st.y + dy } : st)) }))}
+              onMoveOpening={(roomId, openingId, edge, t) => {
+                const r = floor.rooms.find((x) => x.id === roomId);
+                if (!r) return;
+                updateRoom(floor.id, roomId, { openings: r.openings.map((o) => (o.id === openingId ? { ...o, edge, t } : o)) });
+              }}
               busy={busy}
               opacity={opacity}
               setOpacity={setOpacity}
@@ -369,7 +434,7 @@ export function Plans() {
           </Card>
         </div>
 
-        <div className="space-y-4 xl:sticky xl:top-4 xl:self-start">
+        <div className="space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:self-start xl:overflow-y-auto xl:pr-1">
           <Card>
             <h2 className="font-display mb-3 text-lg font-bold">Étage</h2>
             <div className="grid grid-cols-2 gap-3">
@@ -393,10 +458,93 @@ export function Plans() {
             )}
           </Card>
 
+          {floor.rooms.length > 1 && (
+            <Card>
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-display text-lg font-bold">Cloisons entre les pièces</h2>
+                <button
+                  className="rounded-lg border border-rule bg-white px-2.5 py-1 text-xs font-semibold hover:bg-paper-2"
+                  title="Supprime les points posés au milieu d'un mur droit (angle plat), sans changer la forme des pièces."
+                  onClick={() => updateFloor(floor.id, (cur) => { try { return { ...cur, rooms: removeFlatVertices(cur).rooms }; } catch { return cur; } })}
+                >
+                  Nettoyer les points inutiles
+                </button>
+              </div>
+              <p className="mb-2 text-xs text-stone-500">
+                Quand deux pièces se touchent, le site compte une cloison : ossature une seule fois, plaques sur chaque face et isolant de cloison (décoche « isolée » pour ne pas en mettre). Coche « passage » là où il n'y a pas de mur. Les couches de chaque mur sont dessinées sur le plan.
+              </p>
+              {sharedWalls(floor).length === 0 && <p className="text-xs text-stone-400">Aucune pièce ne se touche sur ce plan pour l'instant.</p>}
+              {sharedWalls(floor).length > 0 && (
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <button
+                    className="rounded-lg border border-rule bg-white px-2.5 py-1 text-xs font-semibold hover:bg-paper-2"
+                    title="Ajoute un point sur le mur d'une pièce là où commence le mur d'une voisine. À utiliser seulement si tu veux des murs avec les mêmes extrémités."
+                    onClick={() => updateFloor(floor.id, (cur) => { try { return { ...cur, rooms: withAdjacencyFloor(alignFloor(cur)).rooms }; } catch { return cur; } })}
+                  >
+                    Aligner les extrémités des murs (ajoute des points)
+                  </button>
+                  <span className="text-[11px] text-stone-400">Aucun point n'est ajouté tout seul.</span>
+                </div>
+              )}
+              <div className="space-y-1">
+                {sharedWalls(floor).map((w) => {
+                  const A = floor.rooms.find((r) => r.id === w.roomAId);
+                  const B = floor.rooms.find((r) => r.id === w.roomBId);
+                  if (!A || !B) return null;
+                  return (
+                    <div key={`${w.roomAId}-${w.edgeA}-${w.roomBId}-${w.edgeB}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-rule bg-white/70 px-2 py-1.5 text-xs">
+                      <label className="flex items-center gap-1 font-semibold"><input
+                        type="checkbox"
+                        checked={w.passage}
+                        onChange={(e) => {
+                          const flip = (r: Room, edge: number): Room => {
+                            const wt = { ...(r.wallTypes ?? {}) } as Record<string, string>;
+                            if (e.target.checked) wt[String(edge)] = "none";
+                            else delete wt[String(edge)];
+                            return { ...r, wallTypes: wt as Room["wallTypes"] };
+                          };
+                          updateFloor(floor.id, { rooms: floor.rooms.map((r) => (r.id === A.id ? flip(r, w.edgeA) : r.id === B.id ? flip(r, w.edgeB) : r)) });
+                        }}
+                      />
+                      passage</label>
+                      <span className="font-semibold">{A.name} ⟷ {B.name}</span>
+                      <span className="text-stone-500">{w.lengthM.toFixed(2).replace(".", ",")} m</span>
+                      <span className={`ml-auto rounded px-1.5 py-0.5 font-semibold ${w.passage ? "bg-amber-100 text-amber-900" : "bg-stone-100 text-stone-600"}`}>{w.passage ? "passage" : "cloison"}</span>
+                      {!w.passage && (
+                        <label className="flex items-center gap-1 rounded border border-rule bg-white px-1.5 py-0.5">
+                          <input
+                            type="checkbox"
+                            checked={wallInsulated(floor, w)}
+                            onChange={(e) => {
+                              const set = (r: Room, edge: number): Room => {
+                                const wi = { ...(r.wallInsul ?? {}) };
+                                if (e.target.checked) delete wi[String(edge)];
+                                else wi[String(edge)] = false;
+                                return { ...r, wallInsul: wi };
+                              };
+                              updateFloor(floor.id, { rooms: floor.rooms.map((r) => (r.id === A.id ? set(r, w.edgeA) : r.id === B.id ? set(r, w.edgeB) : r)) });
+                            }}
+                          />
+                          isolée
+                        </label>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
+
+          <PlacoAuditCard />
+
+          <StairsPanel floor={floor} selStair={selStair} setSelStair={setSelStair} onChange={(stairs) => updateFloor(floor.id, { stairs })} />
+
           {room && (
             <RoomEditor
               room={room}
               scale={scale}
+              selOpening={selOpening}
+              setSelOpening={setSelOpening}
               onHoverEdge={setHoverEdge}
               onChange={(patch) => updateRoom(floor.id, room.id, patch)}
               onPoints={(pts) => updateRoom(floor.id, room.id, syncFromPoints(room, pts, scale))}
@@ -431,6 +579,8 @@ export function Plans() {
 function RoomEditor({
   room,
   scale,
+  selOpening,
+  setSelOpening,
   onHoverEdge,
   onChange,
   onPoints,
@@ -438,6 +588,8 @@ function RoomEditor({
 }: {
   room: Room;
   scale: number;
+  selOpening: string | null;
+  setSelOpening: (id: string | null) => void;
   onHoverEdge: (i: number | null) => void;
   onChange: (p: Partial<Room>) => void;
   onPoints: (pts: Pt[]) => void;
@@ -449,7 +601,7 @@ function RoomEditor({
   const pts = pointsForRoom(room, scale);
   const edges = roomEdges(room, scale);
   return (
-    <Card className="max-h-[72vh] overflow-y-auto">
+    <Card>
       <div className="mb-3 flex items-center justify-between">
         <h2 className="font-display text-lg font-bold">Pièce</h2>
         <input type="color" value={room.color} onChange={(e) => onChange({ color: e.target.value })} className="h-8 w-8 cursor-pointer rounded" />
@@ -501,6 +653,18 @@ function RoomEditor({
         <div>
           <div className="mb-1 flex items-center justify-between">
             <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Parois : placo & isolation</span>
+            <button
+              type="button"
+              className="ml-auto rounded-lg border border-rule bg-white px-2 py-1 text-[11px] font-semibold hover:bg-paper-2"
+              title="Tous les murs extérieurs de cette pièce en brique brute : ni isolant, ni placo (garage, local brut). Le plafond se règle à part."
+              onClick={() => {
+                const ws: Record<string, "ossature" | "nu"> = { ...(room.wallStruct ?? {}) };
+                roomEdges(room, scale).forEach((e) => { if (e.exterior) ws[String(e.index)] = "nu"; });
+                onChange({ wallStruct: ws });
+              }}
+            >
+              Garage : murs bruts
+            </button>
           </div>
           <p className="mb-2 rounded-lg bg-paper-2 px-2 py-1.5 text-[11px] leading-relaxed text-stone-500">
             Les numéros <strong>P1, P2…</strong> sont affichés sur le plan quand la pièce est sélectionnée. Survolez une
@@ -520,7 +684,7 @@ function RoomEditor({
                 else next.delete(e.index);
                 const list = [...next];
                 const total = edges.filter((x) => list.includes(x.index)).reduce((s, x) => s + x.lengthM, 0);
-                onChange({ exteriorEdges: list, exteriorWallLength: Math.round(total * 10) / 10 });
+                onChange({ exteriorEdges: list, exteriorWallLength: Math.round(total * 10) / 10, extLocked: true, extAuto: false });
               };
               return (
                 <div
@@ -582,6 +746,25 @@ function RoomEditor({
                       </button>
                     </div>
                   </div>
+                  {e.exterior && (
+                    <label className="mt-1.5 block text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                      Structure du mur extérieur
+                      <select
+                        className="mt-0.5 w-full rounded-lg border border-rule bg-white px-2 py-1.5 text-xs normal-case"
+                        value={room.wallStruct?.[String(e.index)] ?? "brique"}
+                        onChange={(ev) => {
+                          const ws = { ...(room.wallStruct ?? {}) };
+                          if (ev.target.value === "brique") delete ws[String(e.index)];
+                          else ws[String(e.index)] = ev.target.value as "ossature" | "nu";
+                          onChange({ wallStruct: ws });
+                        }}
+                      >
+                        <option value="brique">Brique + isolant + placo</option>
+                        <option value="ossature">Isolant + placo, sans brique (ossature)</option>
+                        <option value="nu">Brique brute : ni isolant ni placo (garage)</option>
+                      </select>
+                    </label>
+                  )}
                   {e.passage && (
                     <p className="mt-1 text-[10px] font-semibold text-amber-700">
                       Passage ouvert : exclu des plaques, bandes, enduits et isolant.
@@ -707,22 +890,7 @@ function RoomEditor({
             <p className="mt-1 text-stone-500">Modifiables dans la vue 3D de chaque poste : ce sont les mêmes données.</p>
           </div>
         )}
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Ouvertures</span>
-            <button className="text-xs font-semibold text-terra" onClick={() => onChange({ openings: [...room.openings, makeOpening()] })}>
-              + ouverture
-            </button>
-          </div>
-          {room.openings.map((o) => (
-            <OpeningRow
-              key={o.id}
-              o={o}
-              onChange={(patch) => onChange({ openings: room.openings.map((x) => (x.id === o.id ? { ...x, ...patch } : x)) })}
-              onRemove={() => onChange({ openings: room.openings.filter((x) => x.id !== o.id) })}
-            />
-          ))}
-        </div>
+        <OpeningsPanel room={room} scale={scale} selOpening={selOpening} setSelOpening={setSelOpening} onChange={onChange} />
         <RoomMaterialsPanel roomId={room.id} />
         <Btn variant="ghost" className="text-red-700" onClick={onRemove}>
           <Trash2 size={14} /> Supprimer la pièce
@@ -776,40 +944,127 @@ function RoomMaterialsPanel({ roomId }: { roomId: string }) {
   );
 }
 
+/** Portes, fenêtres et ouvertures de la pièce : position précise (paroi + distance) et déplacement sur le plan. */
+function OpeningsPanel({
+  room,
+  scale,
+  selOpening,
+  setSelOpening,
+  onChange,
+}: {
+  room: Room;
+  scale: number;
+  selOpening: string | null;
+  setSelOpening: (id: string | null) => void;
+  onChange: (p: Partial<Room>) => void;
+}) {
+  const [newType, setNewType] = useState<Opening["type"]>("fenetre");
+  const edges = planEdges(room, scale);
+  const placed = new Map(placeOpenings(room, scale).map((p) => [p.o.id, p]));
+  const patch = (id: string, p: Partial<Opening>) => onChange({ openings: room.openings.map((x) => (x.id === id ? { ...x, ...p } : x)) });
+  const add = () => {
+    const pre = OPENING_PRESET[newType];
+    const o: Opening = { id: uid(), type: newType, width: pre.width, height: Math.min(pre.height, room.height || 2.5), wall: pre.wall };
+    // posée directement au milieu de la plus longue paroi adaptée, prête à être glissée sur le plan
+    const cand = edges.filter((e) => (pre.wall === "exterieur" ? e.exterior : !e.exterior) && e.lenM > 0.3);
+    const pool = (cand.length ? cand : edges).slice().sort((x, y) => y.lenM - x.lenM);
+    if (pre.wall !== "plafond" && pool[0]) {
+      o.edge = pool[0].index;
+      o.t = 0.5;
+    }
+    onChange({ openings: [...room.openings, o] });
+    setSelOpening(o.id);
+  };
+  return (
+    <div className="rounded-xl border border-rule bg-paper p-3">
+      <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Portes, fenêtres et ouvertures</div>
+      <p className="mb-2 text-[11px] leading-relaxed text-stone-500">
+        Sur le plan, la pièce étant sélectionnée, les ouvertures apparaissent en pastilles colorées sur les parois : glisse-les pour les placer. Tu peux aussi régler ici la paroi et la distance exacte. Pour ouvrir seulement une partie de cloison, ajoute une <b>ouverture libre</b> et place-la à l'endroit voulu : le reste du mur reste plein, en 3D comme dans tous les postes.
+      </p>
+      <div className="mb-2 flex items-center gap-1.5">
+        <Select value={newType} onChange={(e) => setNewType(e.target.value as Opening["type"])}>
+          {OPENING_TYPES.map((t) => (
+            <option key={t} value={t}>{OPENING_NAMES[t]}</option>
+          ))}
+          <option value="trappe">Trappe (plafond)</option>
+        </Select>
+        <button className="shrink-0 rounded-lg bg-ink px-3 py-2 text-xs font-semibold text-white" onClick={add}>+ Ajouter</button>
+      </div>
+      {room.openings.length === 0 && <p className="text-[11px] text-stone-400">Aucune ouverture dans cette pièce.</p>}
+      {room.openings.map((o) => (
+        <OpeningRow
+          key={o.id}
+          o={o}
+          selected={selOpening === o.id}
+          onSelect={() => setSelOpening(o.id)}
+          edges={edges}
+          placed={placed.get(o.id)}
+          roomHeight={room.height || 2.5}
+          onChange={(p) => patch(o.id, p)}
+          onRemove={() => onChange({ openings: room.openings.filter((x) => x.id !== o.id) })}
+        />
+      ))}
+    </div>
+  );
+}
+
 function OpeningRow({
   o,
+  selected,
+  onSelect,
+  edges,
+  placed,
+  roomHeight,
   onChange,
   onRemove,
 }: {
   o: Opening;
+  selected: boolean;
+  onSelect: () => void;
+  edges: ReturnType<typeof planEdges>;
+  placed?: { edge: number; t: number; auto: boolean };
+  roomHeight: number;
   onChange: (p: Partial<Opening>) => void;
   onRemove: () => void;
 }) {
+  const onWall = isWallOpening(o);
+  const edge = placed ? edges[placed.edge] : undefined;
+  const lenM = edge?.lenM ?? 0;
+  const centerCm = placed && edge ? Math.round(placed.t * lenM * 100) : 0;
+  const setCenterCm = (cmv: number) => {
+    if (!edge || !placed) return;
+    const half = o.width / 2;
+    const m = Math.min(lenM - Math.min(half, lenM / 2), Math.max(Math.min(half, lenM / 2), cmv / 100));
+    onChange({ edge: placed.edge, t: Math.round((m / Math.max(0.1, lenM)) * 1000) / 1000 });
+  };
+  const defaultSill = o.type === "fenetre" ? (o.height >= 1 ? 0.9 : 1.3) : 0;
   return (
-    <div className="mb-2 rounded-lg border border-rule bg-white/70 p-2">
+    <div
+      className={`mb-2 rounded-lg border p-2 ${selected ? "border-orange-500 bg-orange-50" : "border-rule bg-white/70"}`}
+      onClick={onSelect}
+    >
       <div className="grid grid-cols-[1fr_70px_70px_28px] items-end gap-1">
         <Select
           value={o.type}
           onChange={(e) => {
             const type = e.target.value as Opening["type"];
-            const preset: Partial<Opening> =
-              type === "porte_garage" ? { width: 2.4, height: 2.0, wall: "exterieur" } : type === "arche" ? { width: 1.2, height: 2.1, wall: "cloison" } : {};
-            onChange({ type, ...preset });
+            const pre = OPENING_PRESET[type];
+            onChange({ type, width: pre.width, height: Math.min(pre.height, roomHeight), wall: pre.wall, sill: undefined });
           }}
         >
-          <option value="porte">Porte</option>
-          <option value="fenetre">Fenêtre</option>
-          <option value="baie">Baie</option>
-          <option value="porte_fenetre">Porte-fenêtre</option>
-          <option value="porte_garage">Porte de garage</option>
-          <option value="arche">Arche / passage</option>
-          <option value="trappe">Trappe</option>
+          {OPENING_TYPES.map((t) => (
+            <option key={t} value={t}>{OPENING_NAMES[t]}</option>
+          ))}
+          <option value="trappe">Trappe (plafond)</option>
         </Select>
         <Num value={o.width} onChange={(n) => onChange({ width: n })} step={0.05} />
         <Num value={o.height} onChange={(n) => onChange({ height: n })} step={0.05} />
         <button onClick={onRemove} className="pb-2 text-stone-400 hover:text-red-700">
           <Trash2 size={14} />
         </button>
+      </div>
+      <div className="mt-0.5 grid grid-cols-[1fr_70px_70px_28px] gap-1 text-[9px] uppercase tracking-wide text-stone-400">
+        <span>Type</span><span>Larg. (m)</span><span>Haut. (m)</span><span />
       </div>
       <Select
         value={o.wall}
@@ -820,6 +1075,72 @@ function OpeningRow({
         <option value="cloison">Dans une cloison — compte 2 faces, à déclarer 1 seule fois</option>
         <option value="plafond">Dans le plafond (trappe)</option>
       </Select>
+      {onWall && edge && placed && (
+        <div className="mt-2 space-y-1.5 rounded-lg bg-paper p-2">
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+              Paroi
+              <select
+                className="mt-0.5 w-full rounded-lg border border-rule bg-white px-2 py-1.5 text-sm normal-case"
+                value={placed.edge}
+                onChange={(e) => {
+                  const i = Number(e.target.value);
+                  onChange({ edge: i, t: 0.5 });
+                }}
+              >
+                {edges.map((x) => (
+                  <option key={x.index} value={x.index}>
+                    P{x.index + 1} ({fmtD(x.lenM, 2)} m){x.exterior ? " · ext." : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+              Centre à (cm du début)
+              <input
+                type="number"
+                className="mt-0.5 w-full rounded-lg border border-rule bg-white px-2 py-1.5 text-sm"
+                value={centerCm}
+                onChange={(e) => setCenterCm(Number(e.target.value))}
+              />
+            </label>
+          </div>
+          <input
+            type="range"
+            className="w-full accent-terra"
+            min={0}
+            max={Math.round(lenM * 100)}
+            value={centerCm}
+            onChange={(e) => setCenterCm(Number(e.target.value))}
+          />
+          <p className="text-[10px] text-stone-500">
+            Bord gauche à {Math.round(centerCm - (o.width * 100) / 2)} cm · bord droit à {Math.round(lenM * 100 - centerCm - (o.width * 100) / 2)} cm de la fin de la paroi.
+            {placed.auto && " Position automatique : déplace-la ou règle-la pour la fixer."}
+          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button className="rounded-lg border border-rule bg-white px-2 py-1 text-[11px] font-semibold" onClick={() => setCenterCm((lenM * 100) / 2)}>Centrer</button>
+            {o.edge != null && (
+              <button className="rounded-lg border border-rule bg-white px-2 py-1 text-[11px] font-semibold" onClick={() => onChange({ edge: undefined, t: undefined })}>
+                Remettre en automatique
+              </button>
+            )}
+            {o.type !== "passage" && o.type !== "arche" && (
+              <label className="ml-auto flex items-center gap-1 text-[11px] font-semibold">
+                Allège
+                <input
+                  type="number"
+                  step={5}
+                  min={0}
+                  className="w-16 rounded-lg border border-rule bg-white px-1.5 py-1 text-sm"
+                  value={Math.round((o.sill ?? defaultSill) * 100)}
+                  onChange={(e) => onChange({ sill: Math.max(0, Number(e.target.value)) / 100 })}
+                />
+                cm
+              </label>
+            )}
+          </div>
+        </div>
+      )}
       {o.wall === "cloison" && (
         <p className="mt-1 text-[10px] leading-relaxed text-stone-500">
           Ne redéclarez pas cette ouverture dans la pièce voisine : les deux faces de la cloison sont déjà déduites.

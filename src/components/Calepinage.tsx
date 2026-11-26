@@ -2,6 +2,7 @@ import { useMemo, useRef, useState, type PointerEvent as RPointerEvent } from "r
 import { useStore } from "../store";
 import { HelpBox } from "./HelpBox";
 import { pointsForRoom } from "../utils/geometry";
+import { closestEdge, insertOnEdge, removeVertex, snapVertex, vertexAngle } from "../utils/geometry";
 import { computeLayout, effectiveAngle, isStaggered, optimizeLayout, PATTERNS, type PatternId } from "../utils/tileLayout";
 import type { Pt, TileLayoutData } from "../types";
 
@@ -138,6 +139,8 @@ export function Calepinage() {
       drag.current = { k: "pan", sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
     }
   };
+  const vclick = useRef<null | { i: number; x: number; y: number; moved: boolean }>(null);
+  const { undo, canUndo } = useStore();
   const onMove = (e: RPointerEvent<SVGSVGElement>) => {
     const d = drag.current;
     if (!d) return;
@@ -156,13 +159,29 @@ export function Calepinage() {
       const ey = dy * my;
       setDraft({ ...data, centered: false, offX: d.ox + ex * Math.cos(rad) + ey * Math.sin(rad), offY: d.oy - ex * Math.sin(rad) + ey * Math.cos(rad) });
     } else if (d.k === "vertex" && data) {
-      const p = sn(toM(e));
+      if (vclick.current && Math.hypot(e.clientX - vclick.current.x, e.clientY - vclick.current.y) > 4) vclick.current.moved = true;
+      if (vclick.current && !vclick.current.moved) return;
+      const raw = toM(e);
+      const base = draft ?? data;
+      const p = snapVertex(base.points, d.i, sn(raw), view.w * 0.006);
       setDraft({ ...data, points: data.points.map((q, i) => (i === d.i ? p : q)) });
     }
   };
   const onUp = () => {
+    const vc = vclick.current;
+    vclick.current = null;
     drag.current = null;
+    if (vc && !vc.moved && data && data.points.length > 3) {
+      // clic gauche sur un point (sans le déplacer) = le supprimer
+      commit({ ...data, points: removeVertex(data.points, vc.i) });
+      return;
+    }
     if (draft) commit(draft);
+  };
+  const addPointAt = (e: RPointerEvent<SVGSVGElement> | React.MouseEvent<SVGSVGElement>) => {
+    if (!data || data.points.length < 3) return;
+    const ce = closestEdge(data.points, toM(e as RPointerEvent<SVGSVGElement>));
+    commit({ ...data, points: insertOnEdge(data.points, ce.edge, ce.hit) });
   };
 
   const optimize = () => {
@@ -252,6 +271,10 @@ export function Calepinage() {
             onPointerDown={onDown}
             onPointerMove={onMove}
             onPointerUp={onUp}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              addPointAt(e);
+            }}
           >
             {floor.planImage && <image href={floor.planImage} x={0} y={0} width={planW} height={planH} opacity={0.55} preserveAspectRatio="none" />}
             {stats?.cells.map((c, i) => (
@@ -293,16 +316,35 @@ export function Calepinage() {
                     e.stopPropagation();
                     svgRef.current?.setPointerCapture(e.pointerId);
                     drag.current = { k: "vertex", i };
+                    vclick.current = { i, x: e.clientX, y: e.clientY, moved: false };
                   }}
+                  onContextMenu={(e) => e.preventDefault()}
                 />
               ))}
+            {data && mode === "edit" && data.points.length >= 3 && data.points.map((p, i) => {
+              const a = vertexAngle(data.points, i);
+              const right = Math.abs(a - 90) < 0.6;
+              const isDrag = drag.current?.k === "vertex" && drag.current.i === i;
+              if (!right && !isDrag) return null;
+              const fs = view.w / 60;
+              return (
+                <g key={`a${i}`} style={{ pointerEvents: "none" }}>
+                  {right && <circle cx={p.x} cy={p.y} r={view.w * 0.014} fill="none" stroke="#16a34a" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
+                  {isDrag && <text x={p.x + fs} y={p.y - fs} fontSize={fs} fontWeight={700} fill={right ? "#16a34a" : "#ea580c"}>{right ? "90° ✓" : `${a.toFixed(1).replace(".", ",")}°`}</text>}
+                </g>
+              );
+            })}
           </svg>
+          <div className="flex flex-wrap items-center gap-2 px-2 pt-1 text-[11px]">
+            <button className={btn} disabled={!canUndo} onClick={undo} title="Annule la dernière modification (Ctrl+Z)">↶ Retour</button>
+            {mode === "edit" && <span className="text-black/50">Clic droit sur le contour = ajouter un point · clic gauche sur un point = le supprimer · les murs et angles droits sont signalés en vert.</span>}
+          </div>
           <p className="px-2 pt-1 text-[11px] text-black/50">
             Vert = carreau entier · orange = coupe · rouge = chute trop étroite. {mode === "draw" ? "Clique pour poser les angles ; reclique sur le point rouge pour fermer." : mode === "move" ? "Glisse sur le plan pour décaler tout le calepinage." : ""}
           </p>
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-3 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:self-start xl:overflow-y-auto xl:pr-1">
           {!data || data.points.length < 3 ? (
             <div className={card}>
               <div className="mb-2 text-sm font-semibold">Contour de {room?.name ?? "la pièce"}</div>
@@ -323,9 +365,19 @@ export function Calepinage() {
               <div>
                 <div className="mb-1 text-xs font-semibold">Pose en quinconce (carreaux décalés d'une rangée à l'autre)</div>
                 <div className="grid grid-cols-2 gap-2">
-                  <button className={!isStaggered(data) && data.pattern !== "diag" ? btnOn : btn} onClick={() => update({ pattern: "droit" })}>Non — joints alignés</button>
+                  <button className={!isStaggered(data) && data.pattern !== "diag" && data.pattern !== "chevron" && data.pattern !== "batons" ? btnOn : btn} onClick={() => update({ pattern: "droit" })}>Non — joints alignés</button>
                   <button className={isStaggered(data) ? btnOn : btn} onClick={() => update({ pattern: "quinconce", shiftPct: data.shiftPct ?? 50 })}>Oui — en quinconce</button>
+                  <button className={data.pattern === "chevron" ? btnOn : btn} onClick={() => update({ pattern: "chevron", angleDeg: data.pattern === "chevron" ? data.angleDeg : 0 })}>Chevron (en V)</button>
+                  <button className={data.pattern === "batons" ? btnOn : btn} onClick={() => update({ pattern: "batons", angleDeg: data.pattern === "batons" ? data.angleDeg : 0 })}>Bâtons rompus</button>
                 </div>
+                {(data.pattern === "chevron" || data.pattern === "batons") && (
+                  <p className="mt-1 text-[11px] text-black/50">
+                    {data.pattern === "chevron"
+                      ? "Chevron : carreaux rectangulaires coupés à 45° à chaque bout, posés en V autour d'une ligne centrale. Le sens se tourne avec « Angle de pose » (ajoute 90° pour changer de sens)."
+                      : "Bâtons rompus (point de Hongrie) : carreaux entiers posés à 90° les uns des autres. Le motif est parfait si la longueur est un multiple de la largeur (ex. 60×10, 90×15)."}
+                    {" "}Prévois 15 à 25 % de chutes (mesuré sur la pièce) et commence la pose au centre d'un mur, sur la ligne de repère tracée au laser.
+                  </p>
+                )}
               </div>
               {isStaggered(data) && (
                 <div className="space-y-2 rounded-lg bg-black/[0.03] p-2">

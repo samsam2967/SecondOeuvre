@@ -9,7 +9,7 @@ export type Block =
   | { t: "ol"; items: string[] }
   | { t: "table"; head: string[]; rows: string[][]; note?: string }
   | { t: "tip" | "warn" | "info"; text: string }
-  | { t: "svg"; id: "arrivee" | "guirlande" | "volumes" | "eclairage"; caption: string };
+  | { t: "svg"; id: "arrivee" | "guirlande" | "volumes" | "eclairage" | "vmc-simple" | "vmc-double" | "vmc-reseau"; caption: string };
 
 export interface Chapter {
   id: string;

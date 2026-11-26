@@ -377,7 +377,7 @@ export function InvoiceStamp() {
         <ol>
           <li><b>Crée tes signatures une fois pour toutes</b> : « Créer / modifier mes signatures », dessine avec la souris, le doigt ou un stylet, puis « Enregistrer comme signature 1 » (ou 2). Elles sont enregistrées sur ton compte (Supabase) et retrouvées sur tous tes appareils.</li>
           <li><b>Ouvre le document</b> : « Ouvrir un PDF / une image » (facture en PDF, photo ou scan). Toutes les pages s'affichent l'une sous l'autre ; une photo devient un PDF d'une page.</li>
-          <li><b>Ajoute un message</b> : « + Message », puis clique sur la page à l'endroit voulu. Modifie le texte à droite (plusieurs lignes possibles), la police, la taille, le gras, l'italique et la couleur.</li>
+          <li><b>Ajoute un message</b> : « + Message », puis clique sur la page à l'endroit voulu. Modifie le texte dans l'éditeur fixe à droite (plusieurs lignes possibles), la police, la taille, le gras, l'italique et la couleur.</li>
           <li><b>Ajoute une signature</b> : « + Signature 1 » ou « + Signature 2 », puis clique sur la page. Règle sa largeur à droite. Les deux signatures se placent indépendamment.</li>
           <li><b>Déplace</b> : glisse un élément n'importe où, même sur une autre page. Utile pour un document qui contient plusieurs factures : place un message et une signature sur chacune. « Copier sur toutes les pages » duplique l'élément à la même position.</li>
           <li><b>Exporte</b> : « Exporter le PDF » télécharge un nouveau fichier « …-annotee.pdf ». Le document d'origine n'est pas modifié.</li>
@@ -385,7 +385,7 @@ export function InvoiceStamp() {
         <p>Dans le PDF exporté, seuls les caractères latins (accents, €, guillemets) sont gérés ; les autres symboles sont remplacés par « ? ».</p>
       </HelpBox>
 
-      <div className="sticky top-[64px] z-30 space-y-1 lg:top-2">
+      <div className="sticky top-[64px] z-30 lg:top-2">
       <div className={`${card} flex flex-wrap items-center gap-2 shadow-md`}>
         <label className={`${btnOn} cursor-pointer`}>
           Ouvrir un PDF / une image
@@ -402,43 +402,6 @@ export function InvoiceStamp() {
           <input type="range" min={400} max={1100} value={zoomW} onChange={(e) => setZoomW(Number(e.target.value))} />
         </label>
         <button className={btnOn} disabled={!pages.length || !!busy} onClick={exportPdf}>Exporter le PDF</button>
-      </div>
-      {/* Outils de texte et de taille : toujours visibles, même quand on descend dans le document */}
-      <div className={`${card} flex flex-wrap items-center gap-3 py-2 text-xs shadow-md`}>
-        {!sel && <span className="text-black/50">Outils du texte et des signatures : sélectionne un élément posé sur la page.</span>}
-        {sel && sel.kind === "text" && (
-          <>
-            <span className="font-semibold">Message</span>
-            <select className="rounded border border-black/15 px-1 py-1" value={sel.font} onChange={(e) => patch(sel.id, { font: e.target.value as FontId })}>
-              <option value="Helvetica">Helvetica</option>
-              <option value="Times">Times</option>
-              <option value="Courier">Courier</option>
-            </select>
-            <label className="flex items-center gap-1">Taille
-              <input type="range" min={6} max={60} value={sel.size} onChange={(e) => patch(sel.id, { size: Number(e.target.value) })} />
-              <input type="number" min={6} max={120} className="w-14 rounded border border-black/15 px-1 py-0.5" value={sel.size} onChange={(e) => patch(sel.id, { size: Math.max(4, Number(e.target.value)) })} /> pt
-            </label>
-            <button className={sel.bold ? btnOn : btn} onClick={() => patch(sel.id, { bold: !sel.bold })}><b>G</b></button>
-            <button className={sel.italic ? btnOn : btn} onClick={() => patch(sel.id, { italic: !sel.italic })}><i>I</i></button>
-            <input type="color" value={sel.color} onChange={(e) => patch(sel.id, { color: e.target.value })} />
-            <input className="min-w-[160px] flex-1 rounded border border-black/15 px-2 py-1" value={sel.text.split("\n")[0]} onChange={(e) => patch(sel.id, { text: [e.target.value, ...sel.text.split("\n").slice(1)].join("\n") })} placeholder="Texte (1re ligne)" />
-          </>
-        )}
-        {sel && sel.kind === "sig" && (
-          <>
-            <span className="font-semibold">Signature {sel.sig + 1}</span>
-            <label className="flex items-center gap-1">Taille
-              <input type="range" min={5} max={60} value={Math.round(sel.wFrac * 100)} onChange={(e) => patch(sel.id, { wFrac: Number(e.target.value) / 100 })} />
-              {Math.round(sel.wFrac * 100)} %
-            </label>
-          </>
-        )}
-        {sel && (
-          <>
-            <button className={btn} onClick={() => setItems((a) => [...a, ...pages.map((_, p) => p).filter((p) => p !== sel.page).map((p) => ({ ...sel, id: rid(), page: p }))])}>Copier sur toutes les pages</button>
-            <button className={btn} onClick={() => { setItems((a) => a.filter((i) => i.id !== sel.id)); setSelId(null); }}>Supprimer</button>
-          </>
-        )}
       </div>
       </div>
       {busy && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">{busy}</div>}
@@ -514,7 +477,7 @@ export function InvoiceStamp() {
           })}
         </div>
 
-        <div className={`${card} sticky top-[210px] h-fit max-h-[calc(100vh-230px)] space-y-3 overflow-y-auto text-xs lg:top-[150px]`}>
+        <div className={`${card} h-fit space-y-3 text-xs xl:sticky xl:top-[78px] xl:max-h-[calc(100vh-96px)] xl:overflow-y-auto`}>
           {!sel ? (
             <p className="text-black/50">Sélectionne un élément posé sur la page pour modifier son texte, sa police, sa taille ou sa taille de signature. Tu peux le glisser n'importe où, même sur une autre page.</p>
           ) : (

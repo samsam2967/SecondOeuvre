@@ -27,6 +27,8 @@ import { fmtD, fmtE } from "../utils/format";
 import { exportShoppingPdf } from "../utils/pdf";
 import { Btn, Card, Field, H, Num, Select, Stat, TableWrap, Td, Th, Toggle } from "./ui";
 import { House3D } from "./House3D";
+import { PostRoomQuantities } from "./PostRoomQuantities";
+import { HeatPlan } from "./HeatPlan";
 
 export function PostPage({ post }: { post: PostId }) {
   const { calc, project, setPage, openTutorial } = useStore();
@@ -49,15 +51,16 @@ export function PostPage({ post }: { post: PostId }) {
         <Stat label="Pièces" value={String(calc.surfaces.rooms)} hint="base de tous les calculs" accent="navy" />
       </div>
 
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rule bg-white/70 px-4 py-3">
-        <div>
-          <div className="text-sm font-semibold">Catalogue centralisé dans Matériaux</div>
-          <p className="text-xs text-stone-500">Formats, tailles, unités, prix et liens d'achat se règlent à un seul endroit.</p>
+      <div className="mb-6 flex flex-wrap items-start gap-3">
+        <div className="flex w-fit max-w-full flex-wrap items-center gap-3 rounded-xl border border-rule bg-white/70 p-4">
+          <div>
+            <div className="text-sm font-semibold">Catalogue centralisé</div>
+            <p className="max-w-xs text-xs text-stone-500">Formats, prix et liens d'achat se règlent dans Matériaux.</p>
+          </div>
+          <Btn variant="ghost" onClick={() => setPage("materiaux")}>Ouvrir Matériaux</Btn>
         </div>
-        <Btn variant="ghost" onClick={() => setPage("materiaux")}>Ouvrir Matériaux</Btn>
+        <House3D key={post} post={post} inline />
       </div>
-
-      <House3D key={post} post={post} />
 
       {post === "placo" && <PlacoPanel />}
       {post === "isolation" && <IsolationPanel />}
@@ -78,28 +81,46 @@ export function PostPage({ post }: { post: PostId }) {
         </Btn>
       </div>
 
-      <Card className="mt-4">
-        <h2 className="font-display mb-3 text-lg font-bold">Quantitatif détaillé</h2>
-        <ItemsTable items={items} />
-      </Card>
+      <details className="group mt-4 rounded-2xl border border-rule bg-white/70">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-3">
+          <span className="font-display text-lg font-bold">Quantitatif détaillé</span>
+          <span className="flex items-center gap-3 font-mono text-xs text-stone-500">
+            {items.length} ligne{items.length > 1 ? "s" : ""} · {Math.round(items.reduce((s, i) => s + i.quantity * i.unitPrice, 0)).toLocaleString("fr-FR")} €
+            <span className="transition-transform group-open:rotate-180">▼</span>
+          </span>
+        </summary>
+        <div className="max-h-[70vh] overflow-y-auto border-t border-rule px-5 py-4">
+          <ItemsTable items={items} />
+          <PostRoomQuantities post={post} />
+        </div>
+      </details>
 
       {tutos.length > 0 && (
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {tutos.map((t) => (
-            <Card key={t.id} className="flex gap-3">
-              <img src={t.image} alt="" className="h-20 w-28 rounded-xl object-cover" />
-              <div>
-                <div className="text-sm font-semibold">{t.title}</div>
-                <div className="text-xs text-stone-500">
-                  {t.duration} · {t.level}
+        <details className="group mt-4 rounded-2xl border border-rule bg-white/70">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-3">
+            <span className="font-display text-lg font-bold">Tutoriels de ce poste</span>
+            <span className="flex items-center gap-3 font-mono text-xs text-stone-500">
+              {tutos.length} fiche{tutos.length > 1 ? "s" : ""}
+              <span className="transition-transform group-open:rotate-180">▼</span>
+            </span>
+          </summary>
+          <div className="grid gap-3 border-t border-rule p-4 md:grid-cols-2">
+            {tutos.map((t) => (
+              <div key={t.id} className="flex gap-3 rounded-xl border border-rule bg-white p-3">
+                <img src={t.image} alt="" className="h-20 w-28 rounded-xl object-cover" />
+                <div>
+                  <div className="text-sm font-semibold">{t.title}</div>
+                  <div className="text-xs text-stone-500">
+                    {t.duration} · {t.level}
+                  </div>
+                  <button className="mt-1 text-xs font-semibold text-terra" onClick={() => openTutorial(t.id)}>
+                    Ouvrir le tuto →
+                  </button>
                 </div>
-                <button className="mt-1 text-xs font-semibold text-terra" onClick={() => openTutorial(t.id)}>
-                  Ouvrir le tuto →
-                </button>
               </div>
-            </Card>
-          ))}
-        </div>
+            ))}
+          </div>
+        </details>
       )}
     </div>
   );
@@ -637,13 +658,16 @@ function SanitairePanel() {
 }
 
 function VmcPanel() {
-  const { project, patchSettings } = useStore();
+  const { project, patchSettings, setPage } = useStore();
   const s = project.settings.vmc;
   const set = (p: Partial<VmcSettings>) => patchSettings("vmc", { ...s, ...p });
   return (
     <div className="space-y-4">
       <Card>
-        <h2 className="font-display mb-3 text-lg font-bold">Type de VMC</h2>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-display text-lg font-bold">Type de VMC</h2>
+          <Btn variant="ghost" onClick={() => setPage("guidevmc")}>Guide : simple flux ou double flux ?</Btn>
+        </div>
         <div className="grid gap-2 md:grid-cols-3">
           {(
             [
@@ -685,6 +709,7 @@ function ChauffagePanel() {
         <Stat label="Boucles" value={String(c.loops)} hint={`max ${s.maxLoopM} m`} accent="forest" />
         <Stat label="Puissance estimée" value={`${fmtD(c.puissanceW / 1000, 1)} kW`} hint="55 W/m²" accent="gold" />
       </div>
+      <HeatPlan />
       <Card>
         <h2 className="font-display mb-3 text-lg font-bold">Plancher chauffant</h2>
         <p className="text-sm text-stone-600">

@@ -4,6 +4,7 @@ import { HelpBox } from "./HelpBox";
 import { pointsForRoom } from "../utils/geometry";
 import { uid } from "../utils/id";
 import { analyzeVmc, DIAMS, deviceFlow, emptyVmcPlan, type Status } from "../utils/vmcPlan";
+import { autoVmcLayout } from "../utils/vmcAuto";
 import type { VmcDevice, VmcRun } from "../types";
 
 type Tool = "select" | "caisson" | "extraction" | "insufflation" | "te" | "gaine" | "delete";
@@ -26,7 +27,7 @@ const TOOLS: [Tool, string][] = [
 ];
 
 export function VmcPlan() {
-  const { project, updateFloor, setVmcPlan, patchSettings } = useStore();
+  const { project, updateFloor, setVmcPlan, patchSettings, undo, canUndo } = useStore();
   const floors = project.floors;
   const [floorId, setFloorId] = useState(floors[0]?.id ?? "");
   const [tool, setTool] = useState<Tool>("select");
@@ -50,6 +51,19 @@ export function VmcPlan() {
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
+  }, []);
+
+  // À la première ouverture, si rien n'est encore posé, le réseau est placé et optimisé automatiquement.
+  const autoDone = useRef(false);
+  useEffect(() => {
+    if (autoDone.current) return;
+    const empty = !floors.some((f) => (f.vmcDevices ?? []).length > 0) && !(project.vmcPlan?.runs.length ?? 0);
+    const hasRooms = floors.some((f) => f.rooms.length > 0);
+    if (empty && hasRooms) {
+      autoDone.current = true;
+      autoPlace(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!floor) return <div className={card}>Ajoute d'abord un étage dans « Plans & pièces ».</div>;
@@ -80,6 +94,22 @@ export function VmcPlan() {
   const delRun = (id: string) => {
     setVmcPlan((p) => ({ ...p, runs: p.runs.filter((r) => r.id !== id) }));
     setSel(null);
+  };
+  const autoPlace = (silent = false) => {
+    const res = autoVmcLayout(project);
+    if (!res) {
+      if (!silent) setMsg("Impossible de placer automatiquement : il faut au moins une pièce humide (cuisine, salle de bain, WC, buanderie) dans « Plans & pièces ».");
+      return;
+    }
+    for (const f of floors) updateFloor(f.id, { vmcDevices: res.devices.get(f.id) ?? [] });
+    setVmcPlan((p) => ({ ...p, runs: res.runs }));
+    setSel(null);
+    setDraft(null);
+    const nb = [...res.devices.values()].flat().filter((d) => d.kind === "extraction" || d.kind === "insufflation").length;
+    const tot = res.analysis.totals[80] + res.analysis.totals[125] + res.analysis.totals[160];
+    setMsg(
+      `Placement automatique : caisson dans « ${res.caissonRoom} » (${res.caissonFloor}), ${nb} bouche(s), ${tot.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} m de gaine, ${res.strategy === "te" ? "réseau avec tés" : "gaines directes depuis le caisson"}. ${res.analysis.ok ? "Aucune limite dépassée." : "Voir le diagnostic : certaines limites sont dépassées."} Tu peux tout modifier à la main.`,
+    );
   };
   const setLimit = (patch: Record<string, unknown>) => setVmcPlan((p) => ({ ...p, limits: { ...p.limits, ...patch } }));
 
@@ -194,6 +224,10 @@ export function VmcPlan() {
             {floors.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
           </select>
         </label>
+        <button className={btn} disabled={!canUndo} onClick={undo} title="Annule la dernière modification (Ctrl+Z)">↶ Retour</button>
+        <button className={btnOn} onClick={() => { if (!allDevs.length || confirm("Remplacer le réseau actuel par un placement automatique optimisé ?")) autoPlace(); }}>
+          Placer automatiquement (optimisé)
+        </button>
         <div className="flex flex-wrap gap-1.5">
           {TOOLS.map(([t, l]) => (
             <button key={t} className={tool === t ? btnOn : btn} onClick={() => { setTool(t); setDraft(null); setMsg(""); }}>{l}</button>
@@ -284,7 +318,7 @@ export function VmcPlan() {
           </p>
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-3 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:self-start xl:overflow-y-auto xl:pr-1">
           <div className={card}>
             <div className="mb-2 text-sm font-semibold">Diagnostic</div>
             <ul className="space-y-1.5 text-xs">

@@ -8,23 +8,22 @@ import { uid } from "../utils/id";
 import { buildScene, ELEC_FIXTURES, FIXTURE_SPEC, OPENING_LABEL, SANITARY_FIXTURES, type Built, type Scene3DOptions, type WallPick } from "../utils/scene3d";
 import { fmtD } from "../utils/format";
 import { floorElevations } from "../utils/elecPlan";
+import { OPENING_PRESET, OPENING_TYPES } from "../utils/openings";
 
 const btn = "rounded-lg border border-black/15 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-black/5 disabled:opacity-40";
 const btnOn = "rounded-lg border border-black bg-black px-3 py-1.5 text-xs font-semibold text-white";
 
 /** Vue 3D de la maison : un poste seul (ce qui est compté dans ce poste) ou tous les postes réunis (récapitulatif). */
-export function House3D({ post }: { post: PostId | "all" }) {
+export function House3D({ post, inline = false }: { post: PostId | "all"; inline?: boolean }) {
   const [open, setOpen] = useState(false);
   const label = post === "all" ? "toute la maison" : (POSTS.find((p) => p.id === post)?.label ?? post);
   return (
-    <div className="mb-6 rounded-xl border border-rule bg-white/70 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className={`rounded-xl border border-rule bg-white/70 p-4 ${inline ? "" : "mb-6"} ${open ? "w-full basis-full" : "w-fit max-w-full"}`}>
+      <div className="flex flex-wrap items-center gap-3">
         <div>
           <div className="text-sm font-semibold">Vue 3D — {label}</div>
-          <p className="text-xs text-stone-500">
-            {post === "all"
-              ? "Tous les postes réunis : active ou masque chaque poste pour voir ce qui est compté, couche par couche."
-              : "Seul ce qui est compté dans ce poste est dessiné, à l'échelle réelle (formats, joints, plaques, panneaux)."}
+          <p className="max-w-xs text-xs text-stone-500">
+            {post === "all" ? "Tous les postes, couche par couche." : "Seul ce qui est compté dans ce poste, à l'échelle réelle."}
           </p>
         </div>
         <button className={open ? btnOn : btn} onClick={() => setOpen((v) => !v)}>
@@ -36,16 +35,6 @@ export function House3D({ post }: { post: PostId | "all" }) {
   );
 }
 
-const OPENING_PRESET: Record<Opening["type"], { width: number; height: number; wall: Opening["wall"] }> = {
-  porte: { width: 0.9, height: 2.04, wall: "cloison" },
-  fenetre: { width: 1.2, height: 1.15, wall: "exterieur" },
-  baie: { width: 2.4, height: 2.15, wall: "exterieur" },
-  porte_fenetre: { width: 0.9, height: 2.15, wall: "exterieur" },
-  porte_garage: { width: 2.4, height: 2.0, wall: "exterieur" },
-  arche: { width: 1.2, height: 2.1, wall: "cloison" },
-  trappe: { width: 0.6, height: 0.6, wall: "plafond" },
-};
-const OPENING_TYPES: Opening["type"][] = ["porte", "fenetre", "baie", "porte_fenetre", "porte_garage", "arche"];
 const cm = (m: number) => Math.round(m * 100);
 
 type Sel = { kind: "opening" | "fixture"; id: string } | null;
@@ -70,10 +59,10 @@ function Scene({ post }: { post: PostId | "all" }) {
   const [ceilings, setCeilings] = useState(true);
   const [xray, setXray] = useState(false);
   const [ossature, setOssature] = useState(false);
-  const [cuts, setCuts] = useState(true);
+  const cuts = false; // aucune différence de couleur liée au calepinage dans les rendus 3D
   const [faithful, setFaithful] = useState(true);
   const [big, setBig] = useState(false);
-  const [placeMode, setPlaceMode] = useState(false);
+  const [placeMode, setPlaceMode] = useState(true);
   const [selected, setSelected] = useState<Sel>(null);
   const [preview, setPreview] = useState<{ id: string; edge: number; u: number } | null>(null);
   const [snap, setSnap] = useState(true);
@@ -88,7 +77,7 @@ function Scene({ post }: { post: PostId | "all" }) {
     walls: new Map(),
   });
   const [error, setError] = useState("");
-  const [addRoomId, setAddRoomId] = useState("");
+  const [openRoom, setOpenRoom] = useState("");
   const [addKind, setAddKind] = useState("fixture:prise");
 
   const opts: Scene3DOptions = useMemo(
@@ -105,7 +94,7 @@ function Scene({ post }: { post: PostId | "all" }) {
       preview,
       fixturesAll: placeMode,
     }),
-    [layers, floorId, ceilings, xray, ossature, cuts, faithful, selected, preview, placeMode],
+    [layers, floorId, ceilings, xray, ossature, faithful, selected, preview, placeMode],
   );
   const optsRef = useRef(opts);
   optsRef.current = opts;
@@ -427,8 +416,8 @@ function Scene({ post }: { post: PostId | "all" }) {
       setSelected({ kind: "fixture", id: n.id });
     }
   };
-  const addElement = () => {
-    const rm = roomsList.find((x) => x.r.id === (addRoomId || roomsList[0]?.r.id));
+  const addElement = (roomId: string) => {
+    const rm = roomsList.find((x) => x.r.id === roomId);
     if (!rm) return;
     // paroi la plus longue qui n'est pas ouverte
     let best = -1;
@@ -465,6 +454,11 @@ function Scene({ post }: { post: PostId | "all" }) {
     if (f) updateFloor(fid, { offsetX: Math.round(((f.offsetX ?? 0) + dx) * 100) / 100, offsetY: Math.round(((f.offsetY ?? 0) + dy) * 100) / 100 });
   };
 
+  useEffect(() => {
+    if (sel) setOpenRoom(sel.r.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
+
   const facts = post === "all" ? [] : [...calc.byPost[post]].sort((a, b) => b.quantity * b.unitPrice - a.quantity * a.unitPrice).slice(0, 7);
   const numInp = "w-20 rounded-lg border border-black/15 bg-white px-2 py-1 text-sm";
   const lineBtn = (dm: number) => (
@@ -473,141 +467,182 @@ function Scene({ post }: { post: PostId | "all" }) {
     </button>
   );
 
+  const kindOptions = (
+    <>
+      <optgroup label="Ouvertures">
+        {OPENING_TYPES.map((t) => (
+          <option key={t} value={`opening:${t}`}>{OPENING_LABEL[t]}</option>
+        ))}
+      </optgroup>
+      <optgroup label="Électricité">
+        {ELEC_FIXTURES.map((k) => (
+          <option key={k} value={`fixture:${k}`}>{FIXTURE_SPEC[k].label}</option>
+        ))}
+      </optgroup>
+      <optgroup label="Sanitaire et équipements">
+        {SANITARY_FIXTURES.map((k) => (
+          <option key={k} value={`fixture:${k}`}>{FIXTURE_SPEC[k].label}</option>
+        ))}
+      </optgroup>
+    </>
+  );
+
   return (
-    <div className="mt-4 space-y-3">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <label className="font-semibold">
-          Étage{" "}
-          <select className="rounded-lg border border-black/15 bg-white px-2 py-1 text-sm" value={floorId} onChange={(e) => setFloorId(e.target.value)}>
-            <option value="all">Tous</option>
-            {floors.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name}
-              </option>
+    <div className="mt-4 grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_410px]">
+      {/* Colonne de gauche : la vue 3D reste en place pendant qu'on fait défiler la page */}
+      <div className="min-w-0 space-y-3">
+        <div className="z-20 space-y-2 rounded-xl bg-white pb-1 xl:sticky xl:top-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <label className="font-semibold">
+              Étage{" "}
+              <select className="rounded-lg border border-black/15 bg-white px-2 py-1 text-sm" value={floorId} onChange={(e) => setFloorId(e.target.value)}>
+                <option value="all">Tous</option>
+                {floors.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button className={btn} onClick={() => fit("iso")}>Vue 3/4</button>
+            <button className={btn} onClick={() => fit("top")}>Vue de dessus</button>
+            <button className={btn} onClick={() => setBig((v) => !v)}>{big ? "Réduire" : "Agrandir"}</button>
+            <label className="flex items-center gap-1"><input type="checkbox" checked={ceilings} onChange={(e) => setCeilings(e.target.checked)} /> Plafonds</label>
+            <label className="flex items-center gap-1" title="Couleurs et textures exactes du produit, sans ombrage"><input type="checkbox" checked={faithful} onChange={(e) => setFaithful(e.target.checked)} /> Couleurs fidèles</label>
+            {(post === "all" || post === "placo") && (
+              <label className="flex items-center gap-1"><input type="checkbox" checked={ossature} onChange={(e) => setOssature(e.target.checked)} /> Ossature</label>
+            )}
+            {(post === "all" || post === "chauffage" || post === "isolation") && (
+              <label className="flex items-center gap-1"><input type="checkbox" checked={xray} onChange={(e) => setXray(e.target.checked)} /> Sous le sol</label>
+            )}
+          </div>
+
+          {post === "all" && (
+            <div className="flex flex-wrap gap-1.5">
+              {POSTS.map((p) => (
+                <button key={p.id} className={layers.has(p.id) ? btnOn : btn} onClick={() => toggleLayer(p.id)}>
+                  {p.short}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div
+            ref={host}
+            className="w-full overflow-hidden rounded-xl border border-black/10 bg-[#eef0ea]"
+            style={{ height: big ? "calc(100vh - 150px)" : "clamp(380px, calc(100vh - 190px), 640px)", cursor: placeMode ? "crosshair" : "grab" }}
+          />
+          {error && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">{error}</div>}
+          <p className="text-[11px] text-black/50">Glisse pour tourner · molette ou pincement pour zoomer · clic droit ou deux doigts pour déplacer.{placeMode ? " Édition active : glisse une porte, une fenêtre ou un élément le long des murs." : ""}</p>
+        </div>
+
+        {floors.length > 1 && (
+          <details className="rounded-xl border border-black/10 bg-white p-3 text-xs">
+            <summary className="cursor-pointer font-semibold">Superposition des étages</summary>
+            <p className="my-2 text-black/60">Si un étage n'est pas exactement au-dessus de l'autre, décale-le ici (même réglage que dans « Plans & pièces »). Le rez-de-chaussée sert de référence.</p>
+            {[...floors].sort((a, b) => a.level - b.level).slice(1).map((f) => (
+              <div key={f.id} className="mb-1 flex flex-wrap items-center gap-1.5">
+                <b className="w-32">{f.name}</b>
+                <span className="text-black/50">X {cm(f.offsetX ?? 0)} cm · Y {cm(f.offsetY ?? 0)} cm</span>
+                {([[-0.1, 0, "← 10"], [0.1, 0, "10 →"], [0, -0.1, "↑ 10"], [0, 0.1, "↓ 10"], [-0.01, 0, "← 1"], [0.01, 0, "1 →"], [0, -0.01, "↑ 1"], [0, 0.01, "↓ 1"]] as [number, number, string][]).map(([dx, dy, l]) => (
+                  <button key={l} className={btn} onClick={() => nudgeFloor(f.id, dx, dy)}>{l} cm</button>
+                ))}
+                <button className={btn} onClick={() => updateFloor(f.id, { offsetX: 0, offsetY: 0 })}>Remettre à 0</button>
+              </div>
             ))}
-          </select>
-        </label>
-        <button className={btn} onClick={() => fit("iso")}>Vue 3/4</button>
-        <button className={btn} onClick={() => fit("top")}>Vue de dessus</button>
-        <button className={btn} onClick={() => setBig((v) => !v)}>{big ? "Réduire" : "Agrandir"}</button>
-        <label className="flex items-center gap-1"><input type="checkbox" checked={ceilings} onChange={(e) => setCeilings(e.target.checked)} /> Plafonds</label>
-        <label className="flex items-center gap-1" title="Couleurs et textures exactes du produit, sans ombrage"><input type="checkbox" checked={faithful} onChange={(e) => setFaithful(e.target.checked)} /> Couleurs fidèles</label>
-        {(post === "all" || post === "placo") && (
-          <label className="flex items-center gap-1"><input type="checkbox" checked={ossature} onChange={(e) => setOssature(e.target.checked)} /> Ossature</label>
+          </details>
         )}
-        {(post === "all" || post === "carrelage") && (
-          <label className="flex items-center gap-1"><input type="checkbox" checked={cuts} onChange={(e) => setCuts(e.target.checked)} /> Coupes du calepinage</label>
-        )}
-        {(post === "all" || post === "chauffage" || post === "isolation") && (
-          <label className="flex items-center gap-1"><input type="checkbox" checked={xray} onChange={(e) => setXray(e.target.checked)} /> Sous le sol</label>
-        )}
-        <button className={placeMode ? btnOn : btn} onClick={() => { setPlaceMode((v) => !v); setMsg(""); }}>
-          {placeMode ? "Terminer l'édition des éléments" : "Éditer les éléments de mur"}
-        </button>
+
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="rounded-xl border border-black/10 bg-white p-3 text-xs">
+            <div className="mb-2 font-semibold">Légende</div>
+            {info.legend.length === 0 && <p className="text-black/50">Rien à dessiner pour l'instant : ajoute des pièces dans « Plans & pièces ».</p>}
+            <ul className="space-y-1">
+              {info.legend.map((l) => (
+                <li key={l.label} className="flex items-start gap-2">
+                  <span className="mt-0.5 h-3 w-3 shrink-0 rounded-sm border border-black/20" style={{ background: l.color }} />
+                  <span>{l.label}</span>
+                </li>
+              ))}
+            </ul>
+            {info.notes.map((n) => (
+              <p key={n} className="mt-2 text-black/50">{n}</p>
+            ))}
+          </div>
+          {facts.length > 0 && (
+            <div className="rounded-xl border border-black/10 bg-white p-3 text-xs">
+              <div className="mb-2 font-semibold">Ce qui est compté dans ce poste (plus gros montants)</div>
+              <ul className="space-y-1">
+                {facts.map((i) => (
+                  <li key={i.id} className="flex justify-between gap-2">
+                    <span>{i.name}</span>
+                    <span className="shrink-0 text-black/60">{fmtD(i.quantity, 1)} {i.unit} · {fmtD(i.quantity * i.unitPrice, 0)} €</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       </div>
 
-      {post === "all" && (
-        <div className="flex flex-wrap gap-1.5">
-          {POSTS.map((p) => (
-            <button key={p.id} className={layers.has(p.id) ? btnOn : btn} onClick={() => toggleLayer(p.id)}>
-              {p.short}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Colonne de droite : édition toujours à portée de main, à côté de la vue 3D */}
+      <aside className="rounded-xl border border-black/10 bg-white p-3 text-xs xl:sticky xl:top-2 xl:max-h-[calc(100vh-1rem)] xl:overflow-y-auto">
+        <div className="mb-1 text-sm font-semibold">Éditer les pièces</div>
+        <p className="mb-2 text-black/60">
+          Ouvre une pièce dans la liste, choisis un élément (porte, fenêtre, prise, sanitaire…) puis déplace-le au centimètre ou glisse-le dans la vue 3D. Tout est enregistré dans le projet, y compris dans « Plans & pièces ».
+        </p>
+        <label className="mb-2 flex items-center gap-1.5 font-semibold">
+          <input type="checkbox" checked={placeMode} onChange={(e) => { setPlaceMode(e.target.checked); setMsg(""); }} /> Glisser les éléments directement dans la vue 3D
+        </label>
+        <label className="mb-2 flex items-center gap-1.5"><input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} /> Aimanter à 5 cm en glissant</label>
+        {msg && <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-amber-900">{msg}</div>}
+        {roomsList.length === 0 && <p className="text-black/50">Aucune pièce : ajoute-en dans « Plans & pièces ».</p>}
 
-      <div ref={host} className="w-full overflow-hidden rounded-xl border border-black/10 bg-[#eef0ea]" style={{ height: big ? "80vh" : 520, cursor: placeMode ? "crosshair" : "grab" }} />
-      {error && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">{error}</div>}
-      <p className="text-[11px] text-black/50">Glisse pour tourner · molette ou pincement pour zoomer · clic droit ou deux doigts pour déplacer.{placeMode ? " En mode édition : glisse un élément le long des murs pour le déplacer." : ""}</p>
-
-      {floors.length > 1 && (
-        <details className="rounded-xl border border-black/10 bg-white p-3 text-xs">
-          <summary className="cursor-pointer font-semibold">Superposition des étages</summary>
-          <p className="my-2 text-black/60">Si un étage n'est pas exactement au-dessus de l'autre, décale-le ici (même réglage que dans « Plans & pièces »). Le rez-de-chaussée sert de référence.</p>
-          {[...floors].sort((a, b) => a.level - b.level).slice(1).map((f) => (
-            <div key={f.id} className="mb-1 flex flex-wrap items-center gap-1.5">
-              <b className="w-32">{f.name}</b>
-              <span className="text-black/50">X {cm(f.offsetX ?? 0)} cm · Y {cm(f.offsetY ?? 0)} cm</span>
-              {([[-0.1, 0, "← 10"], [0.1, 0, "10 →"], [0, -0.1, "↑ 10"], [0, 0.1, "↓ 10"], [-0.01, 0, "← 1"], [0.01, 0, "1 →"], [0, -0.01, "↑ 1"], [0, 0.01, "↓ 1"]] as [number, number, string][]).map(([dx, dy, l]) => (
-                <button key={l} className={btn} onClick={() => nudgeFloor(f.id, dx, dy)}>{l} cm</button>
-              ))}
-              <button className={btn} onClick={() => updateFloor(f.id, { offsetX: 0, offsetY: 0 })}>Remettre à 0</button>
-            </div>
-          ))}
-        </details>
-      )}
-
-      {placeMode && (
-        <div className="rounded-xl border border-black/10 bg-white p-3 text-xs">
-          <div className="mb-2 font-semibold">Éléments de mur : portes, fenêtres, prises, interrupteurs, sanitaire…</div>
-          <p className="mb-2 text-black/60">
-            Clique un élément dans la vue 3D (ou dans la liste), puis glisse-le le long des murs ou règle sa position au centimètre. Les changements sont enregistrés dans le projet : ils apparaissent dans tous les postes et dans « Plans & pièces ».
-          </p>
-          {msg && <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-amber-900">{msg}</div>}
-
-          <div className="mb-3 flex flex-wrap items-end gap-2 rounded-lg bg-black/[0.03] p-2">
-            <label className="font-semibold">
-              Ajouter dans
-              <select className="ml-1 rounded-lg border border-black/15 bg-white px-2 py-1 text-sm" value={addRoomId || roomsList[0]?.r.id || ""} onChange={(e) => setAddRoomId(e.target.value)}>
-                {roomsList.map(({ r }) => (
-                  <option key={r.id} value={r.id}>{r.name}</option>
-                ))}
-              </select>
-            </label>
-            <label className="font-semibold">
-              un(e)
-              <select className="ml-1 rounded-lg border border-black/15 bg-white px-2 py-1 text-sm" value={addKind} onChange={(e) => setAddKind(e.target.value)}>
-                <optgroup label="Ouvertures">
-                  {OPENING_TYPES.map((t) => (
-                    <option key={t} value={`opening:${t}`}>{OPENING_LABEL[t]}</option>
-                  ))}
-                </optgroup>
-                <optgroup label="Électricité">
-                  {ELEC_FIXTURES.map((k) => (
-                    <option key={k} value={`fixture:${k}`}>{FIXTURE_SPEC[k].label}</option>
-                  ))}
-                </optgroup>
-                <optgroup label="Sanitaire et équipements">
-                  {SANITARY_FIXTURES.map((k) => (
-                    <option key={k} value={`fixture:${k}`}>{FIXTURE_SPEC[k].label}</option>
-                  ))}
-                </optgroup>
-              </select>
-            </label>
-            <button className={btnOn} onClick={addElement}>Ajouter</button>
-            <label className="flex items-center gap-1"><input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} /> Aimanter à 5 cm en glissant</label>
-          </div>
-
-          {entries.length === 0 && <p className="text-black/50">Aucun élément : ajoute des pièces dans « Plans & pièces », ou ajoute un élément ci-dessus.</p>}
-          <div className="grid gap-1 sm:grid-cols-2">
-            {entries.map((e) => (
-              <button
-                key={e.key}
-                onClick={() => { setSelected({ kind: e.kind, id: e.id }); setMsg(""); }}
-                className={`rounded-lg border px-2 py-1 text-left ${selected?.id === e.id ? "border-orange-500 bg-orange-50" : "border-black/10 hover:bg-black/5"}`}
-              >
-                <b>{e.r.name}</b> — {e.label}
-                {e.kind === "opening" ? (e.o?.edge != null ? " · placée à la main" : " · position automatique") : e.auto ? " · automatique" : ""}
-              </button>
-            ))}
-          </div>
-
-          {(() => {
-            const rooms = roomsList.filter(({ r }) => info.autoRooms.has(r.id) && (info.fixtures.get(r.id) ?? []).length > 0);
-            if (!rooms.length) return null;
+        <div className="space-y-1.5">
+          {roomsList.map(({ f, r }) => {
+            const list = entries.filter((x) => x.r.id === r.id);
+            const isOpen = openRoom === r.id;
+            const autoList = info.autoRooms.has(r.id) && (info.fixtures.get(r.id) ?? []).length > 0;
             return (
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-black/60">
-                <span>Pièces dont prises, interrupteurs et sanitaire sont répartis automatiquement :</span>
-                {rooms.map(({ f, r }) => (
-                  <button key={r.id} className={btn} onClick={() => updateRoom(f.id, r.id, { fixtures: materialize(f, r) })}>
-                    Personnaliser « {r.name} »
-                  </button>
-                ))}
-              </div>
-            );
-          })()}
-
-          {sel && (
+              <div key={r.id} className={`rounded-lg border ${isOpen ? "border-orange-400" : "border-black/10"}`}>
+                <button
+                  className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-left font-semibold hover:bg-black/5"
+                  onClick={() => setOpenRoom(isOpen ? "" : r.id)}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: r.color }} />
+                    <span className="truncate">{r.name}</span>
+                    <span className="shrink-0 font-normal text-black/50">{floors.length > 1 ? `${f.name} · ` : ""}{list.length} élément{list.length > 1 ? "s" : ""}</span>
+                  </span>
+                  <span className="shrink-0 text-black/50">{isOpen ? "▲" : "▼"}</span>
+                </button>
+                {isOpen && (
+                  <div className="space-y-2 border-t border-black/10 p-2">
+                    <div className="flex flex-wrap items-end gap-1.5 rounded-lg bg-black/[0.03] p-2">
+                      <select className="min-w-0 flex-1 rounded-lg border border-black/15 bg-white px-2 py-1 text-sm" value={addKind} onChange={(e) => setAddKind(e.target.value)}>
+                        {kindOptions}
+                      </select>
+                      <button className={btnOn} onClick={() => { setPlaceMode(true); addElement(r.id); }}>Ajouter</button>
+                    </div>
+                    {list.length === 0 && <p className="text-black/50">Aucun élément dans cette pièce.</p>}
+                    <div className="grid gap-1">
+                      {list.map((e) => (
+                        <button
+                          key={e.key}
+                          onClick={() => { setSelected({ kind: e.kind, id: e.id }); setPlaceMode(true); setMsg(""); }}
+                          className={`rounded-lg border px-2 py-1 text-left ${selected?.id === e.id ? "border-orange-500 bg-orange-50" : "border-black/10 hover:bg-black/5"}`}
+                        >
+                          {e.label}
+                          {e.kind === "opening" ? (e.o?.edge != null ? " · placée à la main" : " · position automatique") : e.auto ? " · automatique" : ""}
+                        </button>
+                      ))}
+                    </div>
+                    {autoList && (
+                      <button className={btn} onClick={() => updateRoom(f.id, r.id, { fixtures: materialize(f, r) })}>
+                        Personnaliser les prises, interrupteurs et sanitaire de « {r.name} »
+                      </button>
+                    )}
+          {sel && sel.r.id === r.id && (
             <div className="mt-3 space-y-2 border-t border-black/10 pt-3">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold">{sel.r.name} — {sel.label}</span>
@@ -709,39 +744,13 @@ function Scene({ post }: { post: PostId | "all" }) {
               )}
             </div>
           )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
-      )}
-
-      <div className="grid gap-3 lg:grid-cols-2">
-        <div className="rounded-xl border border-black/10 bg-white p-3 text-xs">
-          <div className="mb-2 font-semibold">Légende</div>
-          {info.legend.length === 0 && <p className="text-black/50">Rien à dessiner pour l'instant : ajoute des pièces dans « Plans & pièces ».</p>}
-          <ul className="space-y-1">
-            {info.legend.map((l) => (
-              <li key={l.label} className="flex items-start gap-2">
-                <span className="mt-0.5 h-3 w-3 shrink-0 rounded-sm border border-black/20" style={{ background: l.color }} />
-                <span>{l.label}</span>
-              </li>
-            ))}
-          </ul>
-          {info.notes.map((n) => (
-            <p key={n} className="mt-2 text-black/50">{n}</p>
-          ))}
-        </div>
-        {facts.length > 0 && (
-          <div className="rounded-xl border border-black/10 bg-white p-3 text-xs">
-            <div className="mb-2 font-semibold">Ce qui est compté dans ce poste (plus gros montants)</div>
-            <ul className="space-y-1">
-              {facts.map((i) => (
-                <li key={i.id} className="flex justify-between gap-2">
-                  <span>{i.name}</span>
-                  <span className="shrink-0 text-black/60">{fmtD(i.quantity, 1)} {i.unit} · {fmtD(i.quantity * i.unitPrice, 0)} €</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
+      </aside>
     </div>
   );
 }

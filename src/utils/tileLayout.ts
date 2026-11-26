@@ -6,6 +6,8 @@ export const PATTERNS = {
   tiers: { angle: 0, shift: 1 / 3, label: "Décalé 1/3 (progressif)" },
   quinconce: { angle: 0, shift: 0.5, label: "Quinconce réglable (décalage au choix)" },
   diag: { angle: 45, shift: 0, label: "Diagonal 45°" },
+  chevron: { angle: 0, shift: 0, label: "Chevron (carreaux coupés à 45°, en V)" },
+  batons: { angle: 45, shift: 0, label: "Bâtons rompus / point de Hongrie (carreaux à 90°)" },
 } as const;
 export type PatternId = keyof typeof PATTERNS;
 
@@ -16,6 +18,7 @@ export function effectiveAngle(p: Pick<TileLayoutData, "pattern" | "angleDeg" | 
 
 /** Les carreaux sont-ils décalés d'une rangée à l'autre (en quinconce ou décalé) ? */
 export function isStaggered(p: Pick<TileLayoutData, "pattern" | "shiftPct">): boolean {
+  if (p.pattern === "chevron" || p.pattern === "batons") return false;
   if (p.pattern === "quinconce") return (p.shiftPct ?? 50) % 100 !== 0;
   return p.pattern === "demi" || p.pattern === "tiers";
 }
@@ -90,6 +93,41 @@ function clipRect(poly: Pt[], x0: number, y0: number, x1: number, y1: number): P
   return out;
 }
 
+/** Découpe un polygone (la pièce, éventuellement concave) par un polygone convexe (le carreau). */
+function clipConvex(subject: Pt[], clipper: Pt[]): Pt[] {
+  let area2 = 0;
+  for (let i = 0; i < clipper.length; i++) {
+    const a = clipper[i];
+    const b = clipper[(i + 1) % clipper.length];
+    area2 += a.x * b.y - b.x * a.y;
+  }
+  const sgn = area2 >= 0 ? 1 : -1;
+  let out = subject;
+  for (let i = 0; i < clipper.length && out.length; i++) {
+    const a = clipper[i];
+    const b = clipper[(i + 1) % clipper.length];
+    const side = (q: Pt) => sgn * ((b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x));
+    const inp = out;
+    out = [];
+    for (let k = 0; k < inp.length; k++) {
+      const cur = inp[k];
+      const prev = inp[(k + inp.length - 1) % inp.length];
+      const sc = side(cur);
+      const sp = side(prev);
+      if (sc >= 0) {
+        if (sp < 0) out.push(inter(prev, cur, sp, sc));
+        out.push(cur);
+      } else if (sp >= 0) out.push(inter(prev, cur, sp, sc));
+    }
+  }
+  return out;
+}
+const inter = (p: Pt, q: Pt, sp: number, sq: number): Pt => {
+  const t = sp / (sp - sq);
+  return { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t };
+};
+const Ls_ = (n: number) => n;
+
 export function computeLayout(
   points: Pt[],
   tile: { tileL: number; tileW: number },
@@ -153,12 +191,104 @@ export function computeLayout(
   const frac = p.pattern === "quinconce" ? ((p.shiftPct ?? 50) / 100) % 1 : base.shift;
   const progressive = p.pattern === "tiers" || (p.pattern === "quinconce" && p.shiftMode === "progressif");
 
+  const herring = p.pattern === "chevron" || p.pattern === "batons";
   const cells: Cell[] = [];
   let full = 0;
   let cut = 0;
   let slivers = 0;
   let cutArea = 0;
 
+  if (herring) {
+    // Carreaux de pose en chevron ou en bâtons rompus : chaque carreau est un polygone convexe dans le repère de la pose.
+    type Tl = { poly: Pt[]; o: Pt; ux: Pt; uy: Pt };
+    const tiles: Tl[] = [];
+    const jj = j; // joint : on écarte légèrement les carreaux
+    const R2 = Math.SQRT2;
+    const lo = (a: number, b: number) => ({ lo: Math.min(a, b), hi: Math.max(a, b) });
+    void lo;
+    // zone à couvrir, élargie pour que le motif remplisse toute la pièce
+    const pad = Math.max(L, W) * 2;
+    const X0 = minX - pad, X1 = maxX + pad, Y0 = minY - pad, Y1 = maxY + pad;
+    if (p.pattern === "batons") {
+      // pas du motif : H_k = [k·w, k·w+L] × [k·w, (k+1)·w], V_k = [k·w+L, k·w+L+w] × [k·w+w−L, k·w+w] avec w = W + joint
+      const w = W + jj;
+      const Ls = L; // longueur du carreau
+      const kmin = Math.floor((Y0 - Ls) / w) - 3;
+      const kmax = Math.ceil((Y1 + Ls) / w) + 3;
+      const stripShift = Ls + jj * 2; // translation d'une bande à l'autre : (L, −L)
+      const smin = Math.floor((X0 - kmax * w) / stripShift) - 3;
+      const smax = Math.ceil((X1 - kmin * w) / stripShift) + 3;
+      for (let sI = smin; sI <= smax; sI++) {
+        const ox = sI * stripShift;
+        const oy = -sI * stripShift;
+        for (let k = kmin; k <= kmax; k++) {
+          const hx = ox + k * w;
+          const hy = oy + k * w;
+          if (hx < X1 && hx + Ls > X0 && hy < Y1 && hy + W > Y0)
+            tiles.push({ poly: [{ x: hx, y: hy }, { x: hx + Ls, y: hy }, { x: hx + Ls, y: hy + W }, { x: hx, y: hy + W }], o: { x: hx, y: hy }, ux: { x: 1, y: 0 }, uy: { x: 0, y: 1 } });
+          const vx = hx + Ls + jj;
+          const vy = hy + w - Ls;
+          if (vx < X1 && vx + W > X0 && vy < Y1 && vy + Ls > Y0)
+            tiles.push({ poly: [{ x: vx, y: vy }, { x: vx + W, y: vy }, { x: vx + W, y: vy + Ls }, { x: vx, y: vy + Ls }], o: { x: vx, y: vy }, ux: { x: 0, y: 1 }, uy: { x: 1, y: 0 } });
+        }
+      }
+    } else {
+      // chevron : la ligne centrale (« épine ») est verticale ; de part et d'autre, des parallélogrammes à ±45°
+      const d = (W + jj) * R2; // longueur de la coupe d'about le long de l'épine
+      const a = Ls_(L) / R2; // avancée horizontale d'un carreau
+      const sp = 2 * a + jj * R2; // écart entre deux épines
+      const kmin = Math.floor((Y0 - a * 2) / d) - 3;
+      const kmax = Math.ceil((Y1 + a * 2) / d) + 3;
+      const smin = Math.floor(X0 / sp) - 2;
+      const smax = Math.ceil(X1 / sp) + 2;
+      for (let sI = smin; sI <= smax; sI++) {
+        const sx0 = sI * sp;
+        for (let k = kmin; k <= kmax; k++) {
+          const y0 = k * d;
+          for (const dir of [1, -1]) {
+            const x0 = sx0 + dir * (jj * R2) / 2;
+            const pts: Pt[] = [
+              { x: x0, y: y0 },
+              { x: x0, y: y0 + d - jj * R2 },
+              { x: x0 + dir * a, y: y0 + d - jj * R2 + a },
+              { x: x0 + dir * a, y: y0 + a },
+            ];
+            const xs = pts.map((q) => q.x);
+            if (Math.max(...xs) < X0 || Math.min(...xs) > X1 || y0 + d + a < Y0 || y0 > Y1) continue;
+            tiles.push({ poly: pts, o: pts[0], ux: { x: dir / R2, y: 1 / R2 }, uy: { x: -dir / R2, y: 1 / R2 } });
+          }
+        }
+      }
+    }
+    // découpe : chaque carreau est découpé par le contour de la pièce
+    const roomF = pf;
+    for (const t of tiles) {
+      const cl = clipConvex(roomF, t.poly);
+      if (cl.length < 3) continue;
+      const area = polyArea(cl);
+      if (area < 1e-4) continue;
+      const tileA = polyArea(t.poly);
+      const isFull = area >= tileA - 1e-4;
+      const eqLen = area / W;
+      const sliver = !isFull && eqLen < minCut;
+      if (isFull) full++;
+      else {
+        cut++;
+        cutArea += area;
+      }
+      if (sliver) slivers++;
+      let frame: Partial<Cell> = {};
+      if (keepCells) {
+        const ow = toW(t.o);
+        const wx = toW({ x: t.o.x + t.ux.x, y: t.o.y + t.ux.y });
+        const wy = toW({ x: t.o.x + t.uy.x, y: t.o.y + t.uy.y });
+        frame = { o: ow, ux: { x: wx.x - ow.x, y: wx.y - ow.y }, uy: { x: wy.x - ow.x, y: wy.y - ow.y }, tl: L, tw: W };
+      }
+      cells.push({ poly: keepCells ? cl.map(toW) : [], area, full: isFull, w: Math.min(L, eqLen), h: W, sliver, ...frame });
+    }
+  }
+
+  if (!herring)
   for (let r = Math.floor(minY / py); r <= Math.floor(maxY / py); r++) {
     const k = progressive ? (((r * frac) % 1) + 1) % 1 : (((r % 2) + 2) % 2) * frac;
     const ro = k * px;

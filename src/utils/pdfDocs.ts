@@ -4,6 +4,14 @@ import { ELEC_GUIDE, type Block } from "../data/elecGuide";
 import { POSTS } from "../data/catalogs";
 import { NORMS } from "../data/norms";
 import { TUTORIALS, type Tutorial } from "../data/tutorials";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import QRCode from "qrcode";
+import { FicheDiagram } from "../components/FicheDiagram";
+import { VMC_GUIDE } from "../data/vmcGuide";
+import { glossaryFor, glossIndex, GLOSS_COLORS, GLOSS_RGB, markGlossary } from "../data/glossary";
+import { compute } from "./calc";
+import { fmtDays, projectQuantities, tutorialEstimate } from "./durations";
 import type { PostId, Project } from "../types";
 
 /**
@@ -46,14 +54,21 @@ const FOREST: [number, number, number] = [63, 107, 82];
 interface Seg {
   text: string;
   bold: boolean;
+  color?: [number, number, number];
 }
 
 /** Découpe « texte **gras** texte » en segments. */
 function segments(text: string): Seg[] {
   return pdfText(text)
-    .split(/\*\*(.+?)\*\*/g)
-    .map((t, i) => ({ text: t, bold: i % 2 === 1 }))
-    .filter((s) => s.text !== "");
+    .split(/(\*\*.+?\*\*|⟦\d+\|.+?⟧)/g)
+    .filter((t) => t !== "")
+    .map((t): Seg => {
+      let m = t.match(/^\*\*(.+)\*\*$/);
+      if (m) return { text: m[1], bold: true };
+      m = t.match(/^⟦(\d+)\|(.+)⟧$/);
+      if (m) return { text: m[2], bold: true, color: GLOSS_RGB[Number(m[1]) % GLOSS_RGB.length] };
+      return { text: t, bold: false };
+    });
 }
 
 class Flow {
@@ -138,7 +153,7 @@ class Flow {
     d.setFontSize(size);
     const words: Seg[] = [];
     for (const s of segments(text)) {
-      for (const w of s.text.split(/(\s+)/)) if (w !== "") words.push({ text: w, bold: s.bold });
+      for (const w of s.text.split(/(\s+)/)) if (w !== "") words.push({ text: w, bold: s.bold, color: s.color });
     }
     const lines: Seg[][] = [[]];
     let width = 0;
@@ -168,7 +183,9 @@ class Flow {
       let x = x0 + (opts.indent ?? 0);
       for (const s of line) {
         d.setFont("helvetica", s.bold ? "bold" : opts.italic ? "italic" : "normal");
+        if (s.color) d.setTextColor(...s.color);
         d.text(s.text, x, this.y);
+        if (s.color) d.setTextColor(...(opts.color ?? INK));
         x += d.getTextWidth(s.text);
       }
       this.y += lh;
@@ -252,6 +269,60 @@ class Flow {
   }
 
   /** En-tête courant et pied de page sur toutes les pages sauf la couverture. */
+  /** Bandeau de section numéroté, de la même couleur sur toutes les fiches. */
+  section(n: number, text: string, rgb: [number, number, number] = FOREST) {
+    this.ensure(26);
+    const d = this.doc;
+    this.space(2);
+    d.setFillColor(...rgb);
+    d.roundedRect(MX, this.y - 4.6, W - 2 * MX, 6.6, 1, 1, "F");
+    d.setFont("helvetica", "bold");
+    d.setFontSize(10);
+    d.setTextColor(255, 255, 255);
+    d.text(pdfText(`${n}. ${text.toUpperCase()}`), MX + 2.5, this.y);
+    d.setTextColor(...INK);
+    this.y += 6;
+  }
+
+  /** Glossaire : une pastille de couleur par terme (la même que dans le texte). */
+  glossary(entries: { term: string; def: string; idx: number }[]) {
+    const d = this.doc;
+    for (const e of entries) {
+      const lines = this.wrap(e.def, { indent: 5, size: 9 });
+      this.ensure(5 + lines.length * 4.2);
+      d.setFillColor(...GLOSS_RGB[e.idx]);
+      d.rect(MX, this.y - 3, 3, 3, "F");
+      d.setFont("helvetica", "bold");
+      d.setFontSize(9.5);
+      d.setTextColor(...GLOSS_RGB[e.idx]);
+      d.text(pdfText(e.term), MX + 5, this.y);
+      d.setTextColor(...INK);
+      this.y += 4.2;
+      this.drawLines(lines, { indent: 5, size: 9 });
+      this.y += 0.4;
+    }
+  }
+
+  /** QR codes des vidéos, alignés avec leur titre. */
+  qrRow(items: { title: string; url: string; dataUrl: string }[]) {
+    const d = this.doc;
+    const cell = 58;
+    const perRow = Math.max(1, Math.floor((W - 2 * MX) / cell));
+    for (let i = 0; i < items.length; i += perRow) {
+      this.ensure(50);
+      const row = items.slice(i, i + perRow);
+      row.forEach((it, k) => {
+        const x = MX + k * cell;
+        d.addImage(it.dataUrl, "PNG", x, this.y - 2, 34, 34);
+        d.setFont("helvetica", "bold");
+        d.setFontSize(8);
+        const t = d.splitTextToSize(pdfText(it.title), cell - 4);
+        d.text(t.slice(0, 3), x, this.y + 37);
+      });
+      this.y += 48;
+    }
+  }
+
   finish(): jsPDF {
     const d = this.doc;
     const n = d.getNumberOfPages();
@@ -320,6 +391,30 @@ export async function buildElecGuidePdf(project: Project, rasterize?: Rasterizer
   return f.finish();
 }
 
+/** PDF du guide VMC (tous les chapitres). */
+export async function buildVmcGuidePdf(project: Project, rasterize?: Rasterizer): Promise<jsPDF> {
+  const f = new Flow("Guide VMC — simple flux, double flux, gaines et pose", project);
+  const imgs = new Map<string, { dataUrl: string; w: number; h: number }>();
+  if (rasterize) {
+    for (const id of ["vmc-simple", "vmc-double", "vmc-reseau"]) {
+      const r = await rasterize(id);
+      if (r) imgs.set(id, r);
+    }
+  }
+  f.cover("Pour débutant : simple flux ou double flux, débits, gaines, pose, entretien", [
+    "Ce guide explique à quoi sert une VMC, la différence entre simple flux et double flux, comment placer le caisson et les bouches, dimensionner les gaines, poser et entretenir l'installation.",
+    "Les valeurs chiffrées sont des ordres de grandeur issus de l'arrêté du 24 mars 1982, du DTU 68.3 et des notices des fabricants. La notice du caisson choisi et l'avis d'un installateur font foi.",
+  ]);
+  f.h2("Sommaire");
+  f.list(VMC_GUIDE.map((c) => c.title));
+  for (const ch of VMC_GUIDE) {
+    f.h1(ch.title);
+    if (ch.intro) f.p(ch.intro, { italic: true, color: MUTED });
+    for (const b of ch.blocks) renderBlock(f, b, imgs);
+  }
+  return f.finish();
+}
+
 const POST_NORM_KEY: Record<PostId | "general", string> = {
   general: "général",
   placo: "placo",
@@ -340,26 +435,98 @@ export const NORM_LABEL_TO_POST: Record<string, PostId | "general"> = Object.fro
 
 const postLabel = (k: PostId | "general") => (k === "general" ? "Général" : (POSTS.find((p) => p.id === k)?.label ?? k));
 
-function renderTutorial(f: Flow, t: Tutorial, img: { dataUrl: string; w: number; h: number } | null) {
-  f.h2(`${t.title}`);
-  f.p(`**Durée :** ${t.duration}    **Niveau :** ${t.level}`, { size: 9 });
-  if (img) f.image(img, undefined, 120);
+/** Schéma de la fiche (même rendu que sur le site) en image PNG. */
+async function ficheDiagramImage(t: Tutorial, project: Project): Promise<{ img: { dataUrl: string; w: number; h: number }; caption: string } | null> {
+  try {
+    const html = renderToStaticMarkup(createElement(FicheDiagram, { post: t.post, title: t.title, project }));
+    const svg = html.match(/<svg[\s\S]*<\/svg>/)?.[0];
+    const caption = (html.match(/<figcaption[^>]*>([\s\S]*?)<\/figcaption>/)?.[1] ?? "").replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;/g, "'");
+    if (!svg) return null;
+    const img = await svgToPng(svg, 1400);
+    return img ? { img, caption } : null;
+  } catch {
+    return null;
+  }
+}
+
+const SEC_COLORS: [number, number, number][] = [
+  [63, 107, 82], [58, 90, 116], [58, 90, 116], [180, 110, 10], [110, 90, 60], [110, 90, 60], [196, 92, 38], [90, 70, 140], [58, 90, 116],
+];
+
+/**
+ * Trame unique de toutes les fiches : niveau et durée, schémas, normes, astuces et dangers, outils, matériel,
+ * tutoriel détaillé, glossaire, QR codes des vidéos.
+ */
+async function renderTutorial(f: Flow, t: Tutorial, project: Project, loadImage?: ImageLoader) {
+  const calc = compute(project);
+  const est = tutorialEstimate(projectQuantities(project, calc), t);
+  const fr = (n: number) => n.toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+  f.h1(t.title);
+  let n = 0;
+
+  // 1. niveau et durée
+  f.section(++n, "Niveau et durée réaliste pour ton chantier", SEC_COLORS[0]);
+  f.p(`**Niveau :** ${t.level}      **Durée type :** ${t.duration}`, { size: 10 });
+  if (est) f.callout("info", `**Pour ta maison : ${fmtDays(est.days)}.** ${est.basis}. Séchages en plus, à planifier.`);
+  else f.p("Geste ponctuel : la durée type s'applique à chaque occurrence sur ton chantier.", { size: 9, color: MUTED });
+
+  // 2. schémas
+  f.section(++n, "Schémas", SEC_COLORS[1]);
+  const dg = await ficheDiagramImage(t, project);
+  if (dg) f.image(dg.img, "Schéma — " + dg.caption, 160);
+  const img = loadImage && t.image ? await loadImage(t.image) : null;
+  if (img) f.image(img, undefined, 130);
+  if (!dg && !img) f.p("Pas de schéma pour cette fiche.", { size: 9, color: MUTED });
+
+  // 3. normes
+  f.section(++n, "Normes à respecter", SEC_COLORS[2]);
   if (t.memo?.length) {
-    f.p("**À RETENIR**", { size: 10 });
-    f.list(t.memo);
+    f.p("**À retenir sur le chantier**", { size: 10 });
+    f.list(t.memo.map(markGlossary));
   }
-  if (t.tools.length) {
-    f.p("**Outils :** " + t.tools.join(" · "), { size: 9 });
-  }
-  if (t.norms.length) {
-    f.callout("info", "**Normes et règles à respecter :** " + t.norms.join(" · "));
-  }
+  if (t.norms.length) f.list(t.norms.map(markGlossary));
+  else f.p("Voir la page Normes du site pour ce poste.", { size: 9, color: MUTED });
+
+  // 4. astuces et dangers
+  f.section(++n, "Astuces et dangers", SEC_COLORS[3]);
+  const tips = t.steps.filter((s) => s.tip);
+  const warns = t.steps.filter((s) => s.warn);
+  if (!tips.length && !warns.length) f.p("Aucune astuce ou danger particulier pour cette fiche.", { size: 9, color: MUTED });
+  for (const s of warns) f.callout("warn", `**${s.title} —** ${markGlossary(s.warn!)}`);
+  for (const s of tips) f.callout("tip", `**${s.title} —** ${markGlossary(s.tip!)}`);
+
+  // 5. outils
+  f.section(++n, "Outils nécessaires", SEC_COLORS[4]);
+  f.list(t.tools);
+
+  // 6. matériel
+  f.section(++n, "Matériel (quantités de ton projet)", SEC_COLORS[5]);
+  const material = t.post === "general" ? [] : [...calc.byPost[t.post]].filter((i) => i.quantity > 0).sort((a, b) => b.quantity * b.unitPrice - a.quantity * a.unitPrice).slice(0, 14);
+  if (material.length) f.table(["Matériau", "Quantité"], material.map((i) => [i.name, `${fr(i.quantity)} ${i.unit}`]));
+  else f.p("Aucun matériau compté pour cette fiche : renseigne tes pièces dans « Plans & pièces ».", { size: 9, color: MUTED });
+
+  // 7. tutoriel détaillé
+  f.section(++n, "Le tutoriel pas à pas", SEC_COLORS[6]);
   t.steps.forEach((s, i) => {
-    f.p(`**${i + 1}. ${s.title}** — ${s.body}`);
-    if (s.tip) f.callout("tip", s.tip);
-    if (s.warn) f.callout("warn", s.warn);
+    f.p(`**${i + 1}. ${s.title}** — ${markGlossary(s.body)}`);
+    if (s.tip) f.callout("tip", markGlossary(s.tip));
+    if (s.warn) f.callout("warn", markGlossary(s.warn));
   });
-  if (t.videos?.length) f.p("**Vidéos :** " + t.videos.map((v) => `${v.title} (${v.url})`).join(" ; "), { size: 8, color: MUTED });
+
+  // 8. glossaire
+  f.section(++n, "Glossaire", SEC_COLORS[7]);
+  const text = [t.title, ...(t.memo ?? []), ...t.tools, ...t.norms, ...t.steps.flatMap((s) => [s.title, s.body, s.tip ?? "", s.warn ?? ""])].join(" ");
+  const gloss = glossaryFor(text);
+  if (gloss.length) f.glossary(gloss.map((g) => ({ term: g.term, def: g.def, idx: glossIndex(g) })));
+  else f.p("Aucun terme technique particulier dans cette fiche.", { size: 9, color: MUTED });
+
+  // 9. QR codes
+  f.section(++n, "Vidéos (scanne le QR code)", SEC_COLORS[8]);
+  if (t.videos?.length) {
+    const qr = await Promise.all(t.videos.map(async (v) => ({ title: v.title, url: v.url, dataUrl: await QRCode.toDataURL(v.url, { margin: 1, width: 300 }) })));
+    f.qrRow(qr);
+  } else f.p("Pas de vidéo associée.", { size: 9, color: MUTED });
+  void GLOSS_COLORS;
   f.space(3);
 }
 
@@ -368,8 +535,7 @@ export async function buildTutorialPdf(project: Project, tutorialId: string, loa
   const t = TUTORIALS.find((x) => x.id === tutorialId);
   if (!t) return null;
   const f = new Flow(t.title, project);
-  const img = loadImage ? await loadImage(t.image) : null;
-  renderTutorial(f, t, img);
+  await renderTutorial(f, t, project, loadImage);
   return f.finish();
 }
 
@@ -402,8 +568,7 @@ export async function buildPostPdf(project: Project, post: PostId | "general" | 
     if (tutos.length) {
       f.h2(tutos.length > 1 ? "Tutoriels de pose" : "Tutoriel de pose");
       for (const t of tutos) {
-        const img = loadImage ? await loadImage(t.image) : null;
-        renderTutorial(f, t, img);
+        await renderTutorial(f, t, project, loadImage);
       }
     }
   }

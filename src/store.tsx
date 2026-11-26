@@ -75,6 +75,9 @@ interface Store {
   resetTasks: () => void;
   replaceProject: (p: Project) => void;
   resetProject: () => void;
+  /** Annule la dernière modification (plans, pièces, réglages). */
+  undo: () => void;
+  canUndo: boolean;
   loadDemo: () => void;
   cloud: CloudInfo;
   cloudProjects: CloudProjectRow[];
@@ -405,8 +408,36 @@ export function StoreProvider({
 
   const calc = useMemo(() => compute(project), [project]);
 
+  // Historique pour le bouton « Retour » : une sauvegarde par geste (les glissements rapprochés comptent pour un seul).
+  const historyRef = useRef<Project[]>([]);
+  const lastPushRef = useRef(0);
   const mutate = (fn: (p: Project) => Project) =>
-    setProject((p) => ({ ...fn(p), updatedAt: new Date().toISOString() }));
+    setProject((p) => {
+      const now = Date.now();
+      if (now - lastPushRef.current > 700) {
+        historyRef.current.push(p);
+        if (historyRef.current.length > 60) historyRef.current.shift();
+      }
+      lastPushRef.current = now;
+      return { ...fn(p), updatedAt: new Date().toISOString() };
+    });
+  const undo = () => {
+    const prev = historyRef.current.pop();
+    if (!prev) return;
+    lastPushRef.current = 0;
+    setProject({ ...prev, updatedAt: new Date().toISOString() });
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.key.toLowerCase() !== "z") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      e.preventDefault();
+      undo();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const store: Store = {
     project,
@@ -513,6 +544,8 @@ export function StoreProvider({
     resetTasks: () => mutate((p) => ({ ...p, tasks: createEmptyProject().tasks })),
     replaceProject: (pr) => setProject(migrate({ ...pr, updatedAt: new Date().toISOString() })),
     resetProject: () => setProject(createEmptyProject()),
+    undo,
+    canUndo: historyRef.current.length > 0,
     loadDemo: () => setProject(createDemoProject()),
     cloud: {
       email: boot.email,

@@ -1,3 +1,6 @@
+import { stairBoxes, STAIR_MATERIALS } from "./stairs";
+import { floorCollectors } from "./heating";
+import { withAdjacency } from "./adjacency";
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { ISOLANTS } from "../data/catalogs";
@@ -264,7 +267,8 @@ export const OPENING_LABEL: Record<Opening["type"], string> = {
   porte_fenetre: "Porte-fenêtre",
   trappe: "Trappe",
   porte_garage: "Porte de garage",
-  arche: "Arche / passage",
+  arche: "Arche",
+  passage: "Ouverture libre (passage)",
 };
 
 /** Couleur de carrelage déduite du nom quand aucune couleur ni photo n'est renseignée. */
@@ -288,7 +292,7 @@ function withDims(name: string, l: number, w: number): string {
   return new RegExp(`${a}\\s*[x×]\\s*${b}|${b}\\s*[x×]\\s*${a}`, "i").test(name) ? name : `${name} ${a}×${b} cm`;
 }
 
-function isolantColor(name: string, bio: boolean): string {
+export function isolantColor(name: string, bio: boolean): string {
   const n = name.toLowerCase();
   if (/fibre de bois|bois/.test(n) || bio) return "#c8a56a";
   if (/roche/.test(n)) return "#c9b348";
@@ -488,7 +492,8 @@ function wallShape(len: number, h: number, holes: { x0: number; x1: number; y0: 
   return s;
 }
 
-export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx): Built {
+export function buildScene(projectIn: Project, opts: Scene3DOptions, tex: TexCtx): Built {
+  const project = withAdjacency(projectIn);
   const S = project.settings;
   const L = opts.layers;
   const root = new THREE.Group();
@@ -665,7 +670,7 @@ export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx):
           placements.set(o.id, { roomId: room.id, edge: manual.idx, t: tt });
           continue;
         }
-        let cand = wl.filter((w) => !w.open && (o.wall === "exterieur" ? w.exterior && !w.passage : !w.exterior));
+        let cand = wl.filter((w) => !w.open && (o.wall === "exterieur" ? w.exterior : !w.exterior));
         if (!cand.length) cand = wl.filter((w) => !w.open);
         if (!cand.length) continue;
         cand = cand.slice().sort((a, b) => b.len - a.len);
@@ -738,6 +743,37 @@ export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx):
         w.group.add(face);
         pickables.push(face);
 
+        // Épaisseur des murs extérieurs, côté extérieur de la face : isolant puis brique, ou isolant puis plaque (mur sans brique)
+        if (w.exterior && w.passage && !w.open) {
+          // mur brut (garage, paroi sans placo) : brique seule, ni isolant ni placo
+          const gB = track(new THREE.ExtrudeGeometry(wallShape(w.len, h, holes), { depth: (S.briqueMm ?? 200) / 1000, bevelEnabled: false }));
+          gB.translate(0, 0, -(0.004 + (S.briqueMm ?? 200) / 1000));
+          const mB = new THREE.Mesh(gB, lam("#b4553a"));
+          w.group.add(mB);
+          mB.add(new THREE.LineSegments(track(new THREE.EdgesGeometry(gB, 40)), track(new THREE.LineBasicMaterial({ color: "#000000", transparent: true, opacity: 0.25 }))));
+          addLegend("#b4553a", `Brique brute ${Math.round(S.briqueMm ?? 200) / 10} cm — sans isolant ni placo`);
+        }
+        if (w.exterior && !w.passage) {
+          const isoP = (S.isolants?.length ? S.isolants : ISOLANTS).find((i) => i.id === S.isolation.isolantMurId) ?? ISOLANTS[0];
+          const sansBrique = room.wallStruct?.[String(w.idx)] === "ossature";
+          const layersW = [
+            { t: Math.max(0.02, isoP.thickness / 1000), col: isolantColor(isoP.name, isoP.bio), label: `Isolant des murs extérieurs — ${isoP.name} ${isoP.thickness} mm` },
+            sansBrique
+              ? { t: 0.013, col: "#d9d6cf", label: "Plaque côté extérieur (mur isolant + placo, sans brique)" }
+              : { t: (S.briqueMm ?? 200) / 1000, col: "#b4553a", label: `Brique / mur porteur ${Math.round(S.briqueMm ?? 200) / 10} cm` },
+          ];
+          let zc = 0.004;
+          for (const ly of layersW) {
+            const g2 = track(new THREE.ExtrudeGeometry(wallShape(w.len, h, holes), { depth: ly.t, bevelEnabled: false }));
+            g2.translate(0, 0, -(zc + ly.t));
+            const mm = new THREE.Mesh(g2, lam(ly.col));
+            w.group.add(mm);
+            mm.add(new THREE.LineSegments(track(new THREE.EdgesGeometry(g2, 40)), track(new THREE.LineBasicMaterial({ color: "#000000", transparent: true, opacity: 0.25 }))));
+            addLegend(ly.col, ly.label);
+            zc += ly.t;
+          }
+        }
+
         // arête haute
         const top = new THREE.Line(
           track(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, h, 0), new THREE.Vector3(w.len, h, 0)])),
@@ -776,7 +812,7 @@ export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx):
             w.group.add(eg);
             elements.push(eg);
           };
-          if (p.o.type === "arche") {
+          if (p.o.type === "arche" || p.o.type === "passage") {
             if (selected) {
               const hl = box(ow, oh, 0.01, "#f97316");
               hl.position.set(x0 + ow / 2, y0 + oh / 2, 0.012);
@@ -885,7 +921,7 @@ export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx):
             groups[k].forEach((g) => g.dispose());
             if (!mg) return;
             // couleur de repérage des coupes : simple teinte multipliée sur la texture réelle
-            const tint = !opts.cuts || k === "full" ? "#ffffff" : k === "cut" ? "#ffcf9a" : "#ff8f8f";
+            const tint = "#ffffff"; // aucune différence de couleur entre carreaux entiers et coupés
             const mat = faithful
               ? track(new THREE.MeshBasicMaterial({ map: oneTex, color: tint }))
               : track(new THREE.MeshLambertMaterial({ map: oneTex, color: tint }));
@@ -894,10 +930,6 @@ export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx):
             root.add(mesh);
           });
           addLegend(lcol, `Carrelage sol — ${withDims(lt.name, lt.tileL, lt.tileW)} (calepinage : ${st.total} carreaux, perte ${st.wastePct.toFixed(1)} %, joint ${layout.jointMm} mm)`);
-          if (opts.cuts) {
-            addLegend("#f0a35c", "Carreaux coupés");
-            addLegend("#e05c5c", "Chutes trop étroites");
-          }
         } else {
           fMat = srfMap(tileTexture(tex, floorTile, jointOf(room), col, groutColor));
           addLegend(col, `Carrelage sol — ${withDims(floorTile.name, floorTile.tileL, floorTile.tileW)}, joint ${jointOf(room)} mm`);
@@ -1251,13 +1283,103 @@ export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx):
     }
   }
 
-  // ───────────── Chauffage : tubes de plancher chauffant ─────────────
+  // ───────────── Escaliers : marches, paliers, matière, couleur, carrelage ─────────────
+  for (const floor of floors) {
+    const stairs = floor.stairs ?? [];
+    if (!stairs.length) continue;
+    const sc = floor.planScale || 40;
+    const fo = offOf(floor);
+    const z0 = elev.get(floor.id) ?? 0;
+    for (const st of stairs) {
+      const a = (st.angle * Math.PI) / 180;
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      const solid = STAIR_MATERIALS[st.material].solid;
+      const n = Math.max(2, Math.round(st.steps));
+      const riser = st.rise / n;
+      const ox = st.x / sc + fo.x;
+      const oz = st.y / sc + fo.y;
+      for (const b of stairBoxes(st)) {
+        const du = b.u1 - b.u0;
+        const dv = b.v1 - b.v0;
+        const uc = (b.u0 + b.u1) / 2;
+        const vc = (b.v0 + b.v1) / 2;
+        const cx = ox + cos * uc - sin * vc;
+        const cz = oz + sin * uc + cos * vc;
+        // béton et pierre : marches pleines jusqu'au sol ; bois et métal : marche + contremarche, dessous dégagé
+        const thick = solid ? b.z : b.landing ? 0.12 : Math.max(riser, 0.05);
+        let m: THREE.Mesh;
+        if (b.poly) {
+          // marche balancée : contour en éventail extrudé
+          const shape = new THREE.Shape(b.poly.map(([u, v]) => new THREE.Vector2(u, v)));
+          const g = track(new THREE.ExtrudeGeometry(shape, { depth: Math.max(0.03, thick), bevelEnabled: false }));
+          g.rotateX(Math.PI / 2);
+          m = new THREE.Mesh(g, lam(st.color));
+          m.position.set(ox, z0 + b.z, oz);
+        } else {
+          m = box(du, thick, dv, st.color);
+          m.position.set(cx, z0 + b.z - thick / 2, cz);
+        }
+        m.rotation.y = -a;
+        m.add(new THREE.LineSegments(track(new THREE.EdgesGeometry(m.geometry)), track(new THREE.LineBasicMaterial({ color: "#1f2937", transparent: true, opacity: 0.55 }))));
+        root.add(m);
+        if (st.tiled) {
+          let tl: THREE.Mesh;
+          if (b.poly) {
+            const shape = new THREE.Shape(b.poly.map(([u, v]) => new THREE.Vector2(u, v)));
+            const g = track(new THREE.ExtrudeGeometry(shape, { depth: 0.012, bevelEnabled: false }));
+            g.rotateX(Math.PI / 2);
+            tl = new THREE.Mesh(g, lam(st.tileColor));
+            tl.position.set(ox, z0 + b.z + 0.012, oz);
+          } else {
+            tl = box(du, 0.012, dv, st.tileColor);
+            tl.position.set(cx, z0 + b.z + 0.006, cz);
+          }
+          tl.rotation.y = -a;
+          root.add(tl);
+        }
+      }
+    }
+    addLegend(stairs[0].color, "Escalier");
+  }
+
+  // ───────────── Chauffage : isolant du sol, tubes, zones non chauffées, collecteurs et conduits ─────────────
+  if (L.has("chauffage") || L.has("isolation")) {
+    // isolant sous le plancher chauffant : épaisseur réelle, produit choisi pour chaque pièce
+    for (const floor of floors) {
+      const sc = floor.planScale || 40;
+      const fo = offOf(floor);
+      const z0 = elev.get(floor.id) ?? 0;
+      for (const room of floor.rooms) {
+        if (!room.floorHeating) continue;
+        const iso = (S.isolants?.length ? S.isolants : ISOLANTS).find((i) => i.id === (room.floorInsulId || S.isolation.isolantSolId)) ?? ISOLANTS[0];
+        const t = Math.max(0.02, (room.floorInsulMm ?? iso.thickness) / 1000);
+        const pts = pointsForRoom(room, sc).map((p) => ({ x: p.x / sc + fo.x, y: p.y / sc + fo.y }));
+        const shape = new THREE.Shape(pts.map((p) => new THREE.Vector2(p.x, p.y)));
+        const g = track(new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false }));
+        g.rotateX(Math.PI / 2);
+        const col = isolantColor(iso.name, iso.bio);
+        const m = new THREE.Mesh(g, lam(col));
+        m.position.y = z0 - 0.003;
+        root.add(m);
+        addLegend(col, `Isolant du sol — ${iso.name}, ${Math.round(t * 1000)} mm`);
+      }
+    }
+  }
   if (L.has("chauffage")) {
     const pas = Math.max(0.05, (S.chauffage.pasMm || 150) / 1000);
+    const pipeR = 0.011;
     for (const floor of floors) {
       const sc = floor.planScale || 40;
       const fo = offOf(floor);
       const z0 = (elev.get(floor.id) ?? 0) + 0.012;
+      const collectors = floorCollectors(floor).map((c) => ({ x: c.x / sc + fo.x, z: c.y / sc + fo.y }));
+      for (const c of collectors) {
+        const m = box(0.5, 0.35, 0.12, "#0f766e");
+        m.position.set(c.x, z0 + 0.3, c.z);
+        root.add(m);
+      }
+      if (collectors.length) addLegend("#0f766e", "Collecteur du plancher chauffant");
       for (const room of floor.rooms) {
         if (!room.floorHeating) continue;
         const covered =
@@ -1266,7 +1388,19 @@ export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx):
         if (covered) continue;
         const pts = pointsForRoom(room, sc).map((p) => ({ x: p.x / sc + fo.x, y: p.y / sc + fo.y }));
         const ys = pts.map((p) => p.y);
-        const path: THREE.Vector3[] = [];
+        // zones non chauffées (repérées depuis le coin haut-gauche de la pièce)
+        const ox = Math.min(...pts.map((p) => p.x));
+        const oy = Math.min(...ys);
+        const excl = (room.heatExcl ?? []).map((e) => ({ x0: ox + e.u, x1: ox + e.u + e.w, y0: oy + e.v, y1: oy + e.v + e.h }));
+        for (const e of excl) {
+          const pm = new THREE.Mesh(track(new THREE.PlaneGeometry(e.x1 - e.x0, e.y1 - e.y0)), lam("#94a3b8", { transparent: true, opacity: 0.6 }));
+          pm.rotation.x = -Math.PI / 2;
+          pm.position.set((e.x0 + e.x1) / 2, z0 + 0.004, (e.y0 + e.y1) / 2);
+          root.add(pm);
+        }
+        if (excl.length) addLegend("#94a3b8", "Zone non chauffée");
+        const runs: THREE.Vector3[][] = [];
+        let cur: THREE.Vector3[] = [];
         let dir = 1;
         for (let y = Math.min(...ys) + pas / 2 + 0.1; y < Math.max(...ys) - 0.1; y += pas) {
           const xs: number[] = [];
@@ -1276,18 +1410,58 @@ export function buildScene(project: Project, opts: Scene3DOptions, tex: TexCtx):
           });
           if (xs.length < 2) continue;
           xs.sort((a, b) => a - b);
-          const x0 = xs[0] + 0.1;
-          const x1 = xs[xs.length - 1] - 0.1;
-          if (x1 <= x0) continue;
-          if (dir > 0) path.push(new THREE.Vector3(x0, z0, y), new THREE.Vector3(x1, z0, y));
-          else path.push(new THREE.Vector3(x1, z0, y), new THREE.Vector3(x0, z0, y));
+          let pieces: [number, number][] = [[xs[0] + 0.1, xs[xs.length - 1] - 0.1]];
+          for (const e of excl) {
+            if (y < e.y0 - 0.05 || y > e.y1 + 0.05) continue;
+            pieces = pieces.flatMap(([a, b]): [number, number][] => {
+              if (e.x1 <= a || e.x0 >= b) return [[a, b]];
+              const out: [number, number][] = [];
+              if (e.x0 - 0.05 > a) out.push([a, e.x0 - 0.05]);
+              if (e.x1 + 0.05 < b) out.push([e.x1 + 0.05, b]);
+              return out;
+            });
+          }
+          pieces = pieces.filter(([a, b]) => b - a > 0.05);
+          if (!pieces.length) {
+            if (cur.length) runs.push(cur);
+            cur = [];
+            continue;
+          }
+          if (pieces.length === 1) {
+            const [a, b] = pieces[0];
+            if (dir > 0) cur.push(new THREE.Vector3(a, z0, y), new THREE.Vector3(b, z0, y));
+            else cur.push(new THREE.Vector3(b, z0, y), new THREE.Vector3(a, z0, y));
+          } else {
+            if (cur.length) runs.push(cur);
+            cur = [];
+            for (const [a, b] of pieces) runs.push([new THREE.Vector3(a, z0, y), new THREE.Vector3(b, z0, y)]);
+          }
           dir = -dir;
         }
-        const m = tube(path, (S.chauffage.tubeDiameter || 16) / 2000, "#ef4444");
-        if (m) root.add(m);
+        if (cur.length) runs.push(cur);
+        for (const r of runs) {
+          const m = tube(r, (S.chauffage.tubeDiameter || 16) / 2000, "#ef4444");
+          if (m) root.add(m);
+        }
+        // conduits depuis le collecteur le plus proche : départ (rouge) et retour (bleu)
+        if (runs.length && collectors.length) {
+          const first = runs[0][0];
+          const lastRun = runs[runs.length - 1];
+          const last = lastRun[lastRun.length - 1];
+          const near = collectors.slice().sort((p, q) => Math.hypot(p.x - first.x, p.z - first.z) - Math.hypot(q.x - first.x, q.z - first.z))[0];
+          const feed = (a: THREE.Vector3, off: number, color: string) => {
+            const path = [new THREE.Vector3(near.x, z0 + 0.3, near.z + off), new THREE.Vector3(near.x, z0 + 0.02, near.z + off), new THREE.Vector3(a.x, z0 + 0.02, near.z + off), new THREE.Vector3(a.x, z0 + 0.02, a.z)];
+            const m = tube(path, pipeR, color);
+            if (m) root.add(m);
+          };
+          feed(first, -0.04, "#dc2626");
+          feed(last, 0.04, "#2563eb");
+        }
       }
     }
     addLegend("#ef4444", `Tube plancher chauffant Ø${S.chauffage.tubeDiameter} — pas ${S.chauffage.pasMm} mm`);
+    addLegend("#dc2626", "Conduit de départ (eau chaude) vers le collecteur");
+    addLegend("#2563eb", "Conduit de retour vers le collecteur");
     if (!opts.xray && (L.has("carrelage") || L.has("quincaillerie"))) notes.push("Coche « Sous le sol » pour voir les tubes sous le carrelage ou le parquet.");
   }
 

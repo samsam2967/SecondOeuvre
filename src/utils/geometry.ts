@@ -237,3 +237,67 @@ export function svgCoords(svg: SVGSVGElement, clientX: number, clientY: number):
   const p = pt.matrixTransform(ctm.inverse());
   return { x: p.x, y: p.y };
 }
+
+/** Angle intérieur non signé (0–180°) au sommet i. */
+export function vertexAngle(pts: Pt[], i: number): number {
+  const n = pts.length;
+  const a = pts[(i + n - 1) % n];
+  const b = pts[i];
+  const c = pts[(i + 1) % n];
+  const v1 = { x: a.x - b.x, y: a.y - b.y };
+  const v2 = { x: c.x - b.x, y: c.y - b.y };
+  const l = Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y);
+  if (l < 1e-9) return 0;
+  const cos = (v1.x * v2.x + v1.y * v2.y) / l;
+  return (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI;
+}
+
+/** Une paroi est « droite » quand elle est exactement horizontale ou verticale sur le plan. */
+export function edgeAxis(a: Pt, b: Pt, tolDeg = 0.6): "h" | "v" | null {
+  const ang = Math.abs((Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI) % 180;
+  if (ang < tolDeg || ang > 180 - tolDeg) return "h";
+  if (Math.abs(ang - 90) < tolDeg) return "v";
+  return null;
+}
+
+/**
+ * Aimant quand on déplace le sommet i : s'aligne à l'horizontale / verticale des sommets voisins
+ * et se cale sur l'angle droit (au sommet déplacé et chez ses voisins) quand on s'en approche.
+ */
+export function snapVertex(pts: Pt[], i: number, p: Pt, tolPx: number, tolDeg = 3): Pt {
+  const n = pts.length;
+  if (n < 3) return p;
+  const prev = pts[(i + n - 1) % n];
+  const next = pts[(i + 1) % n];
+  let q = { ...p };
+  // 1) horizontale / verticale avec les voisins
+  for (const nb of [prev, next]) {
+    if (Math.abs(q.x - nb.x) < tolPx) q.x = nb.x;
+    if (Math.abs(q.y - nb.y) < tolPx) q.y = nb.y;
+  }
+  // 2) angle droit chez les voisins : le nouveau mur doit être perpendiculaire au mur précédent
+  const pp = pts[(i + n - 2) % n];
+  const nn = pts[(i + 2) % n];
+  const perp = (nb: Pt, other: Pt) => {
+    const d = { x: nb.x - other.x, y: nb.y - other.y };
+    const l = Math.hypot(d.x, d.y);
+    if (l < 1e-9) return;
+    const u = { x: d.x / l, y: d.y / l };
+    const w = { x: q.x - nb.x, y: q.y - nb.y };
+    const wl = Math.hypot(w.x, w.y);
+    if (wl < 1e-9) return;
+    const cos = Math.abs((w.x * u.x + w.y * u.y) / wl);
+    if (Math.asin(Math.min(1, cos)) * (180 / Math.PI) < tolDeg) {
+      const k = w.x * u.x + w.y * u.y;
+      q = { x: q.x - u.x * k, y: q.y - u.y * k };
+    }
+  };
+  perp(prev, pp);
+  perp(next, nn);
+  // 3) angle droit au sommet déplacé : cercle de Thalès sur [prev, next]
+  const m = { x: (prev.x + next.x) / 2, y: (prev.y + next.y) / 2 };
+  const r = Math.hypot(prev.x - next.x, prev.y - next.y) / 2;
+  const dm = Math.hypot(q.x - m.x, q.y - m.y);
+  if (r > 1e-6 && dm > 1e-6 && Math.abs(dm - r) < tolPx) q = { x: m.x + ((q.x - m.x) / dm) * r, y: m.y + ((q.y - m.y) / dm) * r };
+  return q;
+}

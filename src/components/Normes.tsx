@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { NORMS, NORM_POSTS, normsMeta } from "../data/norms";
 import { updateNorms, type NormsUpdateResult } from "../utils/normsUpdate";
 import { ROOM_TYPES } from "../data/catalogs";
@@ -52,6 +52,14 @@ export function Normes() {
   const [upd, setUpd] = useState<NormsUpdateResult | null>(null);
   const [updBusy, setUpdBusy] = useState(false);
   const meta = upd?.meta ?? normsMeta;
+  // Vérification automatique à l'ouverture de la page si la dernière date de plus de 24 h (le bouton reste disponible).
+  useEffect(() => {
+    const last = normsMeta?.checkedAt ? new Date(normsMeta.checkedAt).getTime() : 0;
+    if (Date.now() - last < 24 * 3600 * 1000) return;
+    setUpdBusy(true);
+    updateNorms().then((r) => setUpd(r)).finally(() => setUpdBusy(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const filtered = NORMS.filter((n) => {
     if (post !== "tous" && n.post !== post) return false;

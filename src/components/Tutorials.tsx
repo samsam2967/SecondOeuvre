@@ -4,7 +4,8 @@ import { POSTS } from "../data/catalogs";
 import { TUTORIALS, type Tutorial } from "../data/tutorials";
 import { useStore } from "../store";
 import { browserImageLoader, buildPostPdf, buildTutorialPdf } from "../utils/pdfDocs";
-import { glossaryFor } from "../data/glossary";
+import { glossaryFor, glossIndex, GLOSS_COLORS, splitGlossary } from "../data/glossary";
+import QRCode from "qrcode";
 import { fmtDays, projectQuantities, tutorialEstimate } from "../utils/durations";
 import { FicheDiagram } from "./FicheDiagram";
 import { Card, H } from "./ui";
@@ -165,6 +166,31 @@ function Sec({ n, title, children }: { n: string; title: string; children: React
   );
 }
 
+/** Texte dont les mots du glossaire sont colorés (même couleur que dans le glossaire de la fiche). */
+function GlossText({ text }: { text: string }) {
+  return (
+    <>
+      {splitGlossary(text).map((p, i) =>
+        p.entry ? (
+          <span key={i} title={p.entry.def} className="font-semibold underline decoration-dotted underline-offset-2" style={{ color: GLOSS_COLORS[glossIndex(p.entry)] }}>
+            {p.text}
+          </span>
+        ) : (
+          <span key={i}>{p.text}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+function QrImg({ url }: { url: string }) {
+  const [src, setSrc] = useState("");
+  useEffect(() => {
+    QRCode.toDataURL(url, { margin: 1, width: 160 }).then(setSrc).catch(() => setSrc(""));
+  }, [url]);
+  return src ? <img src={src} alt="QR code" className="h-20 w-20 shrink-0" /> : <div className="h-20 w-20 shrink-0 rounded bg-stone-100" />;
+}
+
 /** Fiche tutoriel : toutes les fiches ont exactement la même trame. */
 function TutoDetail({ t, onPrint, busy }: { t: Tutorial; onPrint: () => void; busy: boolean }) {
   const { project, calc, setPage } = useStore();
@@ -193,21 +219,18 @@ function TutoDetail({ t, onPrint, busy }: { t: Tutorial; onPrint: () => void; bu
       </div>
 
       <div className="px-6 pb-6">
-        <Sec n="01" title="Schéma">
-          <FicheDiagram post={t.post} title={t.title} project={project} />
-          {t.image && (
-            <img src={t.image} alt="" className="mt-3 max-h-72 w-full rounded-xl border border-rule bg-stone-50 object-contain" />
-          )}
-        </Sec>
-
-        <Sec n="02" title="Durée réaliste et niveau">
-          <div className="grid gap-3 sm:grid-cols-2">
+        <Sec n="01" title="Niveau et durée réaliste pour ton chantier">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-rule p-3 text-sm">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Niveau</div>
+              <div className="mt-1 font-semibold">{LEVEL_TEXT[t.level]}</div>
+            </div>
             <div className="rounded-xl border border-rule p-3 text-sm">
               <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Durée type</div>
               <div className="mt-1 font-semibold">{t.duration}</div>
               <p className="mt-1 text-xs text-stone-500">Autoconstruction soignée, une personne, séchages à ajouter.</p>
             </div>
-            <div className="rounded-xl border border-rule p-3 text-sm">
+            <div className="rounded-xl border border-rule bg-stone-50 p-3 text-sm">
               <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Pour ta maison</div>
               {est ? (
                 <>
@@ -215,83 +238,92 @@ function TutoDetail({ t, onPrint, busy }: { t: Tutorial; onPrint: () => void; bu
                   <p className="mt-1 text-xs text-stone-500">{est.basis}</p>
                 </>
               ) : (
-                <p className="mt-1 text-xs text-stone-500">Geste ponctuel : la durée type ci-contre s'applique à chaque occurrence.</p>
+                <p className="mt-1 text-xs text-stone-500">Geste ponctuel : la durée type s'applique à chaque occurrence.</p>
               )}
             </div>
           </div>
         </Sec>
 
-        {t.memo && t.memo.length > 0 && (
-          <Sec n="03" title="À retenir sur le chantier">
-            <ul className="list-disc space-y-1 rounded-xl border border-gold bg-yellow-50 py-3 pl-8 pr-4 text-sm font-medium text-stone-800">
+        <Sec n="02" title="Schémas">
+          <FicheDiagram post={t.post} title={t.title} project={project} />
+          {t.image && <img src={t.image} alt="" className="mt-3 max-h-72 w-full rounded-xl border border-rule bg-stone-50 object-contain" />}
+        </Sec>
+
+        <Sec n="03" title="Normes à respecter">
+          {t.memo && t.memo.length > 0 && (
+            <ul className="mb-3 list-disc space-y-1 rounded-xl border border-gold bg-yellow-50 py-3 pl-8 pr-4 text-sm font-medium text-stone-800">
               {t.memo.map((m) => (
-                <li key={m}>{m}</li>
+                <li key={m}><GlossText text={m} /></li>
               ))}
             </ul>
-          </Sec>
-        )}
+          )}
+          <ul className="list-disc space-y-1 pl-5 text-sm text-stone-700">
+            {t.norms.map((x) => (
+              <li key={x}><GlossText text={x} /></li>
+            ))}
+          </ul>
+          <button className="mt-2 text-xs font-semibold text-terra" onClick={() => setPage("normes")}>Voir la page Normes →</button>
+        </Sec>
 
-        <Sec n="04" title="Outils et matériel pour ton projet">
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <h4 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Outils</h4>
-              <ul className="mt-1 list-disc pl-5 text-sm text-stone-700">
-                {t.tools.map((x) => (
-                  <li key={x}>{x}</li>
-                ))}
-              </ul>
-            </div>
-            <div>
-              <h4 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">Matériel (quantités de ton projet)</h4>
-              {material.length === 0 ? (
-                <p className="mt-1 text-sm text-stone-500">Aucun matériau compté pour cette fiche : renseigne tes pièces dans « Plans & pièces ».</p>
-              ) : (
-                <ul className="mt-1 space-y-0.5 text-sm text-stone-700">
-                  {material.map((i) => (
-                    <li key={i.id} className="flex justify-between gap-2">
-                      <span>{i.name}</span>
-                      <span className="shrink-0 font-semibold">{fr(i.quantity)} {i.unit}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+        <Sec n="04" title="Astuces et dangers">
+          {t.steps.every((s) => !s.tip && !s.warn) && <p className="text-sm text-stone-500">Aucune astuce ou danger particulier pour cette fiche.</p>}
+          <div className="space-y-2">
+            {t.steps.filter((s) => s.warn).map((s) => (
+              <p key={"w" + s.title} className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900"><b>Danger · {s.title} —</b> <GlossText text={s.warn!} /></p>
+            ))}
+            {t.steps.filter((s) => s.tip).map((s) => (
+              <p key={"t" + s.title} className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-900"><b>Astuce · {s.title} —</b> <GlossText text={s.tip!} /></p>
+            ))}
           </div>
         </Sec>
 
-        <Sec n="05" title="Le tutoriel pas à pas">
+        <Sec n="05" title="Outils nécessaires">
+          <ul className="list-disc pl-5 text-sm text-stone-700">
+            {t.tools.map((x) => (
+              <li key={x}>{x}</li>
+            ))}
+          </ul>
+        </Sec>
+
+        <Sec n="06" title="Matériel (quantités de ton projet)">
+          {material.length === 0 ? (
+            <p className="text-sm text-stone-500">Aucun matériau compté pour cette fiche : renseigne tes pièces dans « Plans & pièces ».</p>
+          ) : (
+            <ul className="space-y-0.5 text-sm text-stone-700">
+              {material.map((i) => (
+                <li key={i.id} className="flex justify-between gap-2">
+                  <span>{i.name}</span>
+                  <span className="shrink-0 font-semibold">{fr(i.quantity)} {i.unit}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Sec>
+
+        <Sec n="07" title="Le tutoriel pas à pas">
           <ol className="space-y-4">
             {t.steps.map((s, i) => (
               <li key={s.title} className="grid grid-cols-[44px_1fr] gap-3">
                 <div className="font-display text-3xl font-bold leading-none text-terra">{String(i + 1).padStart(2, "0")}</div>
                 <div>
                   <div className="font-semibold">{s.title}</div>
-                  <p className="mt-1 text-sm leading-relaxed text-stone-600">{s.body}</p>
-                  {s.tip && <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-1.5 text-xs text-emerald-900"><b>Astuce —</b> {s.tip}</p>}
-                  {s.warn && <p className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-900"><b>Attention —</b> {s.warn}</p>}
+                  <p className="mt-1 text-sm leading-relaxed text-stone-600"><GlossText text={s.body} /></p>
+                  {s.tip && <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-1.5 text-xs text-emerald-900"><b>Astuce —</b> <GlossText text={s.tip} /></p>}
+                  {s.warn && <p className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-900"><b>Attention —</b> <GlossText text={s.warn} /></p>}
                 </div>
               </li>
             ))}
           </ol>
         </Sec>
 
-        <Sec n="06" title="Normes à respecter">
-          <ul className="list-disc space-y-1 pl-5 text-sm text-stone-700">
-            {t.norms.map((x) => (
-              <li key={x}>{x}</li>
-            ))}
-          </ul>
-          <button className="mt-2 text-xs font-semibold text-terra" onClick={() => setPage("normes")}>Voir la page Normes →</button>
-        </Sec>
-
-        <Sec n="07" title="Glossaire">
+        <Sec n="08" title="Glossaire">
           {gloss.length === 0 ? (
             <p className="text-sm text-stone-500">Aucun terme technique particulier dans cette fiche.</p>
           ) : (
             <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2">
               {gloss.map((g) => (
                 <div key={g.term}>
-                  <dt className="text-sm font-semibold">{g.term}</dt>
+                  <dt className="text-sm font-semibold" style={{ color: GLOSS_COLORS[glossIndex(g)] }}>{g.term}</dt>
                   <dd className="text-xs leading-relaxed text-stone-600">{g.def}</dd>
                 </div>
               ))}
@@ -299,17 +331,20 @@ function TutoDetail({ t, onPrint, busy }: { t: Tutorial; onPrint: () => void; bu
           )}
         </Sec>
 
-        {t.videos.length > 0 && (
-          <Sec n="08" title="Vidéos">
-            <div className="flex flex-col gap-2">
+        <Sec n="09" title="Vidéos (QR codes)">
+          {t.videos.length === 0 ? (
+            <p className="text-sm text-stone-500">Pas de vidéo associée.</p>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
               {t.videos.map((v) => (
-                <a key={v.url} href={v.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-full border border-rule px-4 py-2 text-sm font-semibold hover:border-terra">
-                  <Play size={14} /> {v.title} <ExternalLink size={12} className="text-stone-400" />
+                <a key={v.url} href={v.url} target="_blank" rel="noreferrer" className="flex items-center gap-3 rounded-xl border border-rule p-3 text-sm font-semibold hover:border-terra">
+                  <QrImg url={v.url} />
+                  <span className="flex items-center gap-1"><Play size={14} /> {v.title} <ExternalLink size={12} className="text-stone-400" /></span>
                 </a>
               ))}
             </div>
-          </Sec>
-        )}
+          )}
+        </Sec>
       </div>
     </Card>
   );

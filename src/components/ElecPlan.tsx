@@ -27,7 +27,7 @@ type Drag =
   | null;
 
 export function ElecPlan() {
-  const { project, updateFloor, setElecRuns, patchSettings } = useStore();
+  const { project, updateFloor, setElecRuns, patchSettings, undo, canUndo } = useStore();
   const floorsSorted = useMemo(() => [...project.floors].sort((a, b) => a.level - b.level), [project.floors]);
   const [floorId, setFloorId] = useState(floorsSorted[0]?.id ?? "");
   const floor: Floor | undefined = project.floors.find((f) => f.id === floorId) ?? floorsSorted[0];
@@ -317,6 +317,14 @@ export function ElecPlan() {
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <button
+              onClick={undo}
+              disabled={!canUndo}
+              title="Annule la dernière modification (Ctrl+Z)"
+              className="flex items-center gap-1.5 rounded-full border border-rule px-3 py-1.5 text-sm font-semibold disabled:opacity-40"
+            >
+              ↶ Retour
+            </button>
+            <button
               onClick={() => setTool("select")}
               className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-semibold ${tool === "select" ? "bg-terra text-white" : "border border-rule"}`}
             >
@@ -512,7 +520,7 @@ export function ElecPlan() {
           </p>
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:self-start xl:overflow-y-auto xl:pr-1">
           <Card>
             <h2 className="font-display mb-2 text-base font-bold">Éléments à poser</h2>
             <div className="grid grid-cols-2 gap-1.5">
